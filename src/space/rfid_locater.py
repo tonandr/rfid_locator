@@ -17,9 +17,16 @@ import keras
 
 # Constant.
 TIME_SLOT = pd.Timedelta(1, unit='h')
+
+CATEGORY_NONE = -1
 CATEGORY_MARKER = 0
 CATEGORY_COMMUNITY = 1
 CATEGORY_CTB = 2
+
+CONFIDENCE_MARKER = 6.
+CONFIDENCE_COMMUNITY_RATIO = 0.1
+CONFIDENCE_CTB = 12.
+
 IS_MULTI_GPU = False
 NUM_GPUS = 4
 
@@ -287,6 +294,8 @@ class ISSRFIDLocator(object):
             @param rawDataPath: Raw data path.
         '''
         
+        self.rawDataPath = rawDataPath
+        
         # Initialize.
         # Create 3 antenna combinations.
         self.aids = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
@@ -300,9 +309,16 @@ class ISSRFIDLocator(object):
                     if t_id <= s_id: continue
                     self.combs.append((f_aid, s_aid, t_aid))
 
+        # Load antenna information.
+        self.antennaInfoDF = pd.read_csv(os.path.join(rawDataPath, 'misc', 'antenna_locations.csv'), header=0)
+        self.antennaInfoDF = self.antennaInfoDF[1:,:]
+        self.antennaInfoDF.index = self.antennaInfoDF.id
+        self.antennaInfoDF = self.antennaInfoDF[['reader_id', 'antenna_id', 'location_x', 'location_y', 'location_z']]  
+
         # Make location references by each category such as the marker, community, CTB.
         # Marker.
         self.markerLocRefDF = pd.read_csv(os.path.join(self.rawDataPath, 'misc', 'marker_tag_locations.txt'))
+        self.markerIds =list(self.markerLocRefDF.epc_id) #?
         
         # Community.
         commLocRef = []
@@ -325,16 +341,23 @@ class ISSRFIDLocator(object):
             
             for tag_id in tags:
                 
-                # Get location.
+                # Get a location and confidence.
                 df = commLocRawDF[commLocRawDF == commName]
+                
+                cr = CONFIDENCE_COMMUNITY_RATIO \
+                    *np.median([np.sqrt(np.power(df.x.iloc[0] - self.antennaInfoDF.iloc[i].location_x.iloc[0], 2.0) \
+                                          + np.power(df.y.iloc[0] - self.antennaInfoDF.iloc[i].location_y.iloc[0], 2.0) \
+                                          + np.power(df.z.iloc[0] - self.antennaInfoDF.iloc[i].location_z.iloc[0], 2.0)) \
+                                          for i in range(24)])
                 
                 commLocRef.append({'epc_id': tag_id
                                    , 'x': df.x.iloc[0]
                                    , 'y': df.y.iloc[0]
-                                   , 'z': df.z.iloc[0]})
+                                   , 'z': df.z.iloc[0]
+                                   , 'cr': cr})
         
-        self.commLocRefDF = pd.DataFrame(commLocRef)        
-        
+        self.commLocRefDF = pd.DataFrame(commLocRef)
+                
     def train(self, hps, modelLoading = False):
         '''
             Train.
@@ -379,7 +402,8 @@ class ISSRFIDLocator(object):
         self.model.summary()        
         
         # Create training and validation data.
-        rssiM, posM = self.__createTrValData__()
+        tr, val = self.__createTrValData__(hps)
+        rssiM, posM = tr
         
         # Train the model.
         hists = []
@@ -416,13 +440,17 @@ class ISSRFIDLocator(object):
             
         return lossMean                
         
-    def __createTrValData__(self):
+    def __createTrValData__(self, hps):
         '''
             Create training and validation data.
+            @param hps: Hyper-parameters.
         '''
         
         # Load raw data.
         rawDatasDF = pd.read_csv('train.csv')
+        
+        # Training data.
+        trRawDatasDF = rawDatasDF.iloc[:int(rawDatasDF.shape[0]*(1.0 - hps['val_ratio'])), :]
         
         # Make the rssi value matrix and x, y, z matrix according to 3 antenna combinations.
         rssiRawM = np.ndarray(shape=(31, 31, 31), dtype=np.object)
@@ -434,8 +462,8 @@ class ISSRFIDLocator(object):
                     rssiRawM[i,j,k] = []
                     posRawM[i,j,k] = []
         
-        for i in range(rawDatasDF.shape[0]):
-            rawDataDF = rawDatasDF.iloc[i, :]
+        for i in range(trRawDatasDF.shape[0]):
+            rawDataDF = trRawDatasDF.iloc[i, :]
             
             rssiRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
             .append((rawDataDF.rssi1.iloc[0], rawDataDF.rssi2.iloc[0], rawDataDF.rssi3.iloc[0]))
@@ -468,8 +496,181 @@ class ISSRFIDLocator(object):
         rssiM = np.asarray([rssiM[:,:,i] for i in range(maxLength)])
         posM = np.asarray([posM[:,:,i] for i in range(maxLength)])
         
-        return rssiM, posM
+        tr = (rssiM, posM)
+        
+        # Validation data.
+        valRawDatasDF = rawDatasDF.iloc[int(rawDatasDF.shape[0]*(1.0 - hps['val_ratio'])):, :]
+        
+        # Make the rssi value matrix and x, y, z matrix according to 3 antenna combinations.
+        rssiRawM = np.ndarray(shape=(31, 31, 31), dtype=np.object)
+        posRawM = np.ndarray(shape=(31, 31, 31), dtype=np.object)
+        
+        for i in range(31):
+            for j in range(31):
+                for k in range(31):
+                    rssiRawM[i,j,k] = []
+                    posRawM[i,j,k] = []
+        
+        for i in range(valRawDatasDF.shape[0]):
+            rawDataDF = valRawDatasDF.iloc[i, :]
+            
+            rssiRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
+            .append((rawDataDF.rssi1.iloc[0], rawDataDF.rssi2.iloc[0], rawDataDF.rssi3.iloc[0]))
+            
+            posRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
+            .append((rawDataDF.x.iloc[0], rawDataDF.y.iloc[0], rawDataDF.z.iloc[0]))
+        
+        # Extract data relevant to 3 antenna combinations.
+        rssiM = np.ndarray(shape=(2024), dtype=np.object)
+        posM = np.ndarray(shape=(2024), dtype=np.object)                                                                                               
+        
+        for i in range(2024):
+            rssiM[i] = np.asarray(rssiRawM[self.combs[i]])
+            posM[i] = np.asarray(posRawM[self.combs[i]])
+            
+        # Adjust batch size to same size.
+        # Get maximum batch length.
+        lengths = [rssiM[i].shape[0] for i in range(24)]
+        maxLength = lengths[np.argmax(lengths)]
+        rssiMList = []
+        posMList = []
+            
+        for i in range(2024):
+            rssiMList.append(np.concatenate([rssiM[i], np.repeat(rssiM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
+            posMList.append(np.concatenate([posM[i], np.repeat(posM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
+        
+        rssiM = np.asarray(rssiMList)
+        posM = np.asarray(posMList)
+        
+        rssiM = np.asarray([rssiM[:,:,i] for i in range(maxLength)])
+        posM = np.asarray([posM[:,:,i] for i in range(maxLength)])
+        
+        val = (rssiM, posM)        
+        
+        return tr, val
     
+    def evaluate(self, hps, modelLoading = True):
+        '''
+            Evaluate the performance of the iss rfid locator.
+            @param hps: Hyper-parameters.
+            @param modelLoading: Model loading flag.
+        '''
+        
+        self.hps = hps
+        
+        if modelLoading == True:
+            print('Load the pre-trained model...')
+            
+            if IS_MULTI_GPU == True:
+                self.model = multi_gpu_model(keras.models.load_model('iss_rfid_locator.h5'), gpus = NUM_GPUS) 
+            else:
+
+                self.model = keras.models.load_model('iss_rfid_locator.h5')
+        
+        # Load raw data.
+        rawDatasDF = pd.read_csv('train.csv')
+        
+        # Training data.
+        trRawDatasDF = rawDatasDF.iloc[:int(rawDatasDF.shape[0]*(1.0 - hps['val_ratio'])), :]
+        
+        # Make the rssi value matrix and x, y, z matrix according to 3 antenna combinations.
+        rssiRawM = np.ndarray(shape=(31, 31, 31), dtype=np.object)
+        posRawM = np.ndarray(shape=(31, 31, 31), dtype=np.object)
+        
+        for i in range(31):
+            for j in range(31):
+                for k in range(31):
+                    rssiRawM[i,j,k] = []
+                    posRawM[i,j,k] = []
+        
+        for i in range(trRawDatasDF.shape[0]):
+            rawDataDF = trRawDatasDF.iloc[i, :]
+            
+            rssiRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
+            .append((rawDataDF.rssi1.iloc[0], rawDataDF.rssi2.iloc[0], rawDataDF.rssi3.iloc[0]))
+            
+            posRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
+            .append((rawDataDF.x.iloc[0], rawDataDF.y.iloc[0], rawDataDF.z.iloc[0]))
+        
+        # Extract data relevant to 3 antenna combinations.
+        rssiM = np.ndarray(shape=(2024), dtype=np.object)
+        posM = np.ndarray(shape=(2024), dtype=np.object)                                                                                               
+        
+        for i in range(2024):
+            rssiM[i] = np.asarray(rssiRawM[self.combs[i]])
+            posM[i] = np.asarray(posRawM[self.combs[i]])
+            
+        # Adjust batch size to same size.
+        # Get maximum batch length.
+        lengths = [rssiM[i].shape[0] for i in range(24)]
+        maxLength = lengths[np.argmax(lengths)]
+        rssiMList = []
+        posMList = []
+            
+        for i in range(2024):
+            rssiMList.append(np.concatenate([rssiM[i], np.repeat(rssiM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
+            posMList.append(np.concatenate([posM[i], np.repeat(posM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
+        
+        rssiM = np.asarray(rssiMList)
+        posM = np.asarray(posMList)
+        
+        rssiM = np.asarray([rssiM[:,:,i] for i in range(maxLength)])
+        posM = np.asarray([posM[:,:,i] for i in range(maxLength)])
+        
+        tr = (rssiM, posM)
+        
+        # Validation data.
+        valRawDatasDF = rawDatasDF.iloc[int(rawDatasDF.shape[0]*(1.0 - hps['val_ratio'])):, :]
+        
+        # Make the rssi value matrix and x, y, z matrix according to 3 antenna combinations.
+        rssiRawM = np.ndarray(shape=(31, 31, 31), dtype=np.object)
+        posRawM = np.ndarray(shape=(31, 31, 31), dtype=np.object)
+        
+        for i in range(31):
+            for j in range(31):
+                for k in range(31):
+                    rssiRawM[i,j,k] = []
+                    posRawM[i,j,k] = []
+        
+        for i in range(valRawDatasDF.shape[0]):
+            rawDataDF = valRawDatasDF.iloc[i, :]
+            
+            rssiRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
+            .append((rawDataDF.rssi1.iloc[0], rawDataDF.rssi2.iloc[0], rawDataDF.rssi3.iloc[0]))
+            
+            posRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
+            .append((rawDataDF.x.iloc[0], rawDataDF.y.iloc[0], rawDataDF.z.iloc[0]))
+        
+        # Extract data relevant to 3 antenna combinations.
+        rssiM = np.ndarray(shape=(2024), dtype=np.object)
+        posM = np.ndarray(shape=(2024), dtype=np.object)                                                                                               
+        
+        for i in range(2024):
+            rssiM[i] = np.asarray(rssiRawM[self.combs[i]])
+            posM[i] = np.asarray(posRawM[self.combs[i]])
+            
+        # Adjust batch size to same size.
+        # Get maximum batch length.
+        lengths = [rssiM[i].shape[0] for i in range(24)]
+        maxLength = lengths[np.argmax(lengths)]
+        rssiMList = []
+        posMList = []
+            
+        for i in range(2024):
+            rssiMList.append(np.concatenate([rssiM[i], np.repeat(rssiM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
+            posMList.append(np.concatenate([posM[i], np.repeat(posM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
+        
+        rssiM = np.asarray(rssiMList)
+        posM = np.asarray(posMList)
+        
+        rssiM = np.asarray([rssiM[:,:,i] for i in range(maxLength)])
+        posM = np.asarray([posM[:,:,i] for i in range(maxLength)])
+        
+        val = (rssiM, posM)                
+        
+        
+        
+            
     def test(self, hps, modelLoading = True):
         '''
             Test.
@@ -521,14 +722,98 @@ class ISSRFIDLocator(object):
         results = []
         taskRFIDDataDFG = taskRFIDDataDF.groupby(1) # By epc id.
         
+        # Get the bias calibration factor.
+        xOff, yOff, zOff = self.__calBiasCalFactor__(taskRFIDDataDFG) 
+        
         for i, id in enumerate(taskTagIds):
+            
+            # Check a tag id category, and determine position and confidence.
+            category = self.__checkTagIdCategory__(id)
+            
+            if category == CATEGORY_MARKER:
+                
+                # Get the position of a marker tag.
+                resDF = self.markerLocRefDF[self.markerLocRefDF.epc_id == id]
+                cr = CONFIDENCE_MARKER
+                x, y, z = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0] #?
+                
+                results.append({'task-id': taskId, 'epc_id': id, 'x': x, 'y': y, 'z': z, 'confidence_radius': cr})
+            elif category == CATEGORY_COMMUNITY:
+                
+                # Get the position of a community tag.
+                resDF = self.commLocRefDF[self.commLocRefDF.epc_id == id]
+                
+                x, y, z = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0] #?
+                cr = resDF.cr.iloc[0]
+                
+                results.append({'task-id': taskId, 'epc_id': id, 'x': x, 'y': y, 'z': z, 'confidence_radius': cr})                
+            else:
+                
+                # Predict a position and radius confidence.
+                df = taskRFIDDataDFG.get_group(id)
+                df = df.sort_values(by=2) 
+                   
+                # Get rssi values.
+                rssiVals = np.zeros(shape=(1,2024,3))    
+                rssi_by_aid = {}
+                
+                for aid in list(taskRFIDDataDFG .groups.keys()):
+                    df = taskRFIDDataDFG.get_group(aid)
+                    rssi = df.rssi.median() #?
+                    rssi_by_aid[aid] = rssi
+                
+                aids = list(rssi_by_aid.keys())
+                
+                for f_id, f_aid in enumerate(aids):
+                    for s_id, s_aid in enumerate(aids):
+                        if s_id <= f_id: continue
+                        
+                        for t_id, t_aid in enumerate(aids):
+                            if t_id <= s_id: continue        
+                            
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 0] = rssi_by_aid[f_aid]
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
+                
+                # Predict a position.
+                pos = self.model(rssiVals) # Dimension?
+                x = np.median(pos[0, :, 0])
+                y = np.median(pos[0, :, 1])
+                z = np.median(pos[0, :, 2])
+                
+                # Calibrate bias.
+                x += xOff
+                y += yOff
+                z += zOff 
+                
+                # Get confidence radius.
+                if xOff == 0.:
+                    cr = CONFIDENCE_CTB
+                else:
+                    cr = np.sqrt(np.power(CONFIDENCE_CTB, 2.0) + np.power(CONFIDENCE_MARKER, 2.0)) #?
+                
+                results.append({'task-id': taskId, 'epc_id': id, 'x': x, 'y': y, 'z': z, 'confidence_radius': cr})
+        
+        return pd.DataFrame(results)
+    
+    def __calBiasCalFactor__(self, taskRFIDDataDFG):
+        '''
+            Calculate the bias calibration factor using marker tags.
+            @param taskRFIDDataDFG: Task rfid data dataframe group by epc id.
+        '''
+        
+        xOffs, yOffs, zOffs = [], [], []
+        
+        for id in self.markerIds:
+            try:
+                df = taskRFIDDataDFG.get_group(id)
+            except Exception:
+                continue
+            
+            df = df.sort_values(by=2)
             
             # Get rssi values.
             rssiVals = np.zeros(shape=(1,2024,3))
-            
-            df = taskRFIDDataDFG.get_group(id)
-            df = df.sort_values(by=2)
-
             rssi_by_aid = {}
             
             for aid in list(taskRFIDDataDFG .groups.keys()):
@@ -544,23 +829,60 @@ class ISSRFIDLocator(object):
                     
                     for t_id, t_aid in enumerate(aids):
                         if t_id <= s_id: continue        
-                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 0] = rssi_by_aid[f_aid]
-                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
-                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
+                        
+                        rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 0] = rssi_by_aid[f_aid]
+                        rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
+                        rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
             
-            # Predict position.
+            # Predict a position.
             pos = self.model(rssiVals) # Dimension?
             x = np.median(pos[0, :, 0])
             y = np.median(pos[0, :, 1])
             z = np.median(pos[0, :, 2])
             
-            # Get confidence radius.
+            # Calculate offset.
+            resDF = self.markerLocRefDF[self.markerLocRefDF.epc_id == id]
+            xt, yt, zt = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0] #?            
             
-            cr
-            
-            results.append({'task-id': taskId, 'epc_id': id, 'x': x, 'y': y, 'z': z, 'confidence_radius': cr})
+            xOffs.append(xt - x)
+            yOffs.append(yt - y)
+            zOffs.append(zt - z)
         
-        return pd.DataFrame(results)
+        # Check exception.
+        if len(xOffs) == 0:
+            return (0., 0., 0.)
+        
+        return (np.median(xOffs), np.median(yOffs), np.median(zOffs))            
+                
+    def __checkTagIdCategory__(self, tagId):
+        '''
+            Check a tag id category.
+            @param tagId: Tag id.
+        '''
+        
+        # Marker.
+        resDF = self.markerLocRefDF[self.markerLocRefDF.epc_id == tagId]
+        
+        if resDF.shape[0] != 0: #?
+            category = CATEGORY_MARKER
+        else:
+            
+            # Community.
+            resDF = self.commLocRefDF[self.commLocRefDF.epc_id == tagId]
+            
+            if resDF.shape[0] != 0: #?
+                category = CATEGORY_COMMUNITY
+            else:
+                
+                # CTB.
+                resDF = self.ctbLocRefDF[self.ctbLocRefDF.epc_id == tagId]
+                
+                if resDF.shape[0] != 0: #?
+                    category = CATEGORY_CTB
+                else:
+                    category = CATEGORY_NONE
+
+        return category
         
 if __name__ == '__main__':
     pass
