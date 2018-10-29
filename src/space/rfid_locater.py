@@ -5,6 +5,8 @@ Created on Oct 17, 2018
 '''
 
 import os
+import argparse
+import time
 
 import pandas as pd
 import numpy as np
@@ -14,6 +16,8 @@ from keras.layers import Dense, Dropout, Flatten, Input
 from keras import optimizers
 from keras.utils import multi_gpu_model
 import keras
+
+import ipyparallel as ipp
 
 # Constant.
 TIME_SLOT = pd.Timedelta(1, unit='h')
@@ -27,16 +31,26 @@ CONFIDENCE_MARKER = 6.
 CONFIDENCE_COMMUNITY_RATIO = 0.1
 CONFIDENCE_CTB = 12.
 
+RMIN_MARKER = 48.0
+RMIN_COMMUNITY = 48.0
+RMIN_CTB = 12.0
+
 IS_MULTI_GPU = False
 NUM_GPUS = 4
 
 IS_DEBUG = False
+
+markerLocRefDF = None
+commLocRefDF = None
+ctbLocRefDF = None
 
 def createTrValData(rawDataPath):
     '''
         Create training and validation data.
         @param rawDataPath: Raw data path.
     '''
+    
+    global markerLocRefDF, commLocRefDF, ctbLocRefDF
     
     # Make location references by each category such as the marker, community, CTB.
     # Marker.
@@ -51,21 +65,20 @@ def createTrValData(rawDataPath):
     with open(os.path.join(rawDataPath, 'misc', 'communities.txt'), 'r') as f:
         lines = f.readlines()
         
-        for i in range(len(lines)/2):
-            commName = lines[i][0:-1]
-            tags = [int(v) for v in lines[i+1][2:-2].split(',')]
+        for i in range(int(len(lines)/2)):
+            commName = lines[i*2][0:-1]
+            tags = [int(v) for v in lines[i*2+1][1:-2].split(',')]
             
             tagsByComm[commName] = tags
     
     # Create the location table for each tag.
     for commName in tagsByComm:
+        df = commLocRawDF[commLocRawDF.id == commName]
         tags = tagsByComm[commName]
         
         for tag_id in tags:
-            
-            # Get location.
-            df = commLocRawDF[commLocRawDF == commName]
-            
+        
+            # Get location.                
             commLocRef.append({'epc_id': tag_id
                                , 'x': df.x.iloc[0]
                                , 'y': df.y.iloc[0]
@@ -82,9 +95,9 @@ def createTrValData(rawDataPath):
     with open(os.path.join(rawDataPath, 'misc', 'ctb_tags.txt'), 'r') as f:
         lines = f.readlines()
         
-        for i in range(len(lines)/2):
-            ctbName = lines[i][0:-1]
-            tags = [int(v) for v in lines[i+1][2:-2].split(',')]
+        for i in range(int(len(lines)/2)):
+            ctbName = lines[i*2][0:-1]
+            tags = [int(v) for v in lines[i*2+1][1:-2].split(',')]
             
             tagsByctb[ctbName] = tags
     
@@ -109,132 +122,156 @@ def createTrValData(rawDataPath):
                                           , 'a1_id'
                                           , 'a2_id'
                                           , 'a3_id'
-                                          , 'rssi1_mean'
-                                          , 'rssi2_mean'
-                                          , 'rssi3_mean'
+                                          , 'rssi1'
+                                          , 'rssi2'
+                                          , 'rssi3'
                                           , 'x'
                                           , 'y'
                                           , 'z'])
     
-    trainRawDF = pd.read_csv(os.path.join(rawDataPath, 'rfid_raw_readings_train.txt'))
+    vals = getTrainRawDFGList(rawDataPath)
+    
+    '''
+    pClient = ipp.Client()
+    pView = pClient[:]
+    
+    pView.push({'markerLocRefDF': markerLocRefDF, 'commLocRawDF': commLocRawDF, 'ctbLocRefDF': ctbLocRefDF})
+
+    trValDataDFs = pView.map(calLocationTableForEachTag, vals, block=True)    
+    '''
+    
+    trValDataDFs = []
+    
+    for val in vals:
+        ft = time.time()
+        trValDataDFs.append(calLocationTableForEachTag(val))
+        et = time.time()
+        
+        print(val[1], val[2], et - ft)
+        
+    trValDataDF = trValDataDFs[0]
+    
+    for i in range(1, len(trValDataDFs)):
+        trValDataDF = trValDataDF.append(trValDataDFs[i])
+        
+    # Save training data.
+    trValDataDF.to_csv('train.csv')    
+
+def getTrainRawDFGList(rawDataPath):
+    '''
+        Get train raw DFG list.
+        @param rawDataPath: Raw data path.
+    '''
+    
+    trainRawDFGList = []
+
+    trainRawDF = pd.read_csv(os.path.join(rawDataPath, 'rfid_raw_readings_train.txt'), sep='\t')
+    #trainRawDF = pd.read_csv(os.path.join(rawDataPath, 'rfid_raw_task-example.txt'), sep='\t')
     
     # Group data by tag ids.
     trainRawDFG = trainRawDF.groupby('epc_id')
     tagIds = list(trainRawDFG.groups.keys())
+    numTagIds = len(tagIds)
     
+    # Get group list.
     for tagId in tagIds:
+        trainRawDFGList.append(trainRawDFG.get_group(tagId))
+    
+    vals = []
+    
+    for v in zip(trainRawDFGList, tagIds, range(numTagIds)):
+        vals.append(v)
+    
+    return vals
+
+def calLocationTableForEachTag(val):
+    '''
+        Calculate the location table for each tag.
+        @param val: Train raw DF, tag id, tag id number.
+    '''
+    
+    global markerLocRefDF, commLocRefDF, ctbLocRefDF
+    
+    rawDF = val[0]
+    tagId = val[1]
+    tagIdNum = val[2]
+    
+    trValDataDF = pd.DataFrame(columns = ['category'
+                                          , 'epc_id'
+                                          , 'start'
+                                          , 'end'
+                                          , 'a1_id'
+                                          , 'a2_id'
+                                          , 'a3_id'
+                                          , 'rssi1'
+                                          , 'rssi2'
+                                          , 'rssi3'
+                                          , 'x'
+                                          , 'y'
+                                          , 'z'])
+
+    rawDF = rawDF.sort_values(by = 'date')
+    rawDF.index = pd.to_datetime(rawDF.date)
+    rawDF = rawDF[['epc_id', 'antenna_id', 'rssi', 'freq', 'phase', 'power', 'cnt']]
+    
+    # Check a valid tag id.
+    # Marker.
+    resDF = markerLocRefDF[markerLocRefDF.epc_id == tagId]
+    
+    if resDF.shape[0] != 0:
+        category = CATEGORY_MARKER
+        x, y, z = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0]
+    else:
         
-        # Get the raw DF of a tag id.                               
-        rawDF = trainRawDFG.get_group(tagId)
-        rawDF = rawDF.sort_values(by = 'date')
+        # Community.
+        resDF = commLocRefDF[commLocRefDF.epc_id == tagId]
         
-        for i in range(rawDF.shape[0]): rawDF.date.iat[i] = pd.Timestamp(rawDF.date.iloc[i]) 
-        
-        rawDF.index = rawDF.date
-        rawDF = rawDF[['epc_id', 'antenna_id', 'rssi', 'freq', 'phase', 'power', 'cnt']]
-        
-        # Check a valid tag id.
-        # Marker.
-        resDF = markerLocRefDF[markerLocRefDF.epc_id == tagId]
-        
-        if resDF.shape[0] != 0: #?
-            category = CATEGORY_MARKER
+        if resDF.shape[0] != 0:
+            category = CATEGORY_COMMUNITY
             x, y, z = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0]
         else:
             
-            # Community.
-            resDF = commLocRefDF[commLocRefDF.epc_id == tagId]
+            # CTB.
+            resDF = ctbLocRefDF[ctbLocRefDF.epc_id == tagId]
             
-            if resDF.shape[0] != 0: #?
-                category = CATEGORY_COMMUNITY
-                x, y, z = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0]
-            else:
+            if resDF.shape[0] != 0:
                 
-                # CTB.
-                resDF = ctbLocRefDF[ctbLocRefDF.epc_id == tagId]
-                
-                if resDF.shape[0] != 0: #?
+                # Extract data relevant to allowable time slots.
+                if tagId == 13127:
+                    rawDF = rawDF[pd.Timestamp(resDF.start.iloc[0]):pd.Timestamp(resDF.end.iloc[0])]
                     
-                    # Extract data relevant to allowable time slots.
-                    if tagId == 13127:
-                        rawDF = rawDF[pd.Timestamp(resDF.start.iloc[0]):pd.Timestamp(resDF.end.iloc[0])]
-                        
-                        # Check exception.
-                        if rawDF.shape[0] == 0:
-                            continue
-                        
-                        category = CATEGORY_CTB
-                        x, y, z = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0]
-                    else:
-                        rawDFs, xs, ys, zs = [], [], [], []
-                        category = CATEGORY_CTB
-                        
-                        for i in range(3):
-                            rawDFUnit = rawDF[pd.Timestamp(resDF.start.iloc[i]):pd.Timestamp(resDF.end.iloc[i])]
-                                                        
-                            rawDFs.append(rawDFUnit)
-                            x, y, z = resDF.x.iloc[i], resDF.y.iloc[i], resDF.z.iloc[i]                            
-                            xs.append(x)
-                            ys.append(y)
-                            zs.append(z)
-                        
-                        # Check exception.
-                        if (rawDFs[0].shape[0] == 0) and (rawDFs[1].shape[0] == 0) and (rawDFs[2].shape[0] == 0):
-                            continue
+                    # Check exception.
+                    if rawDF.shape[0] == 0:
+                        return trValDataDF
+                    
+                    category = CATEGORY_CTB
+                    x, y, z = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0]
                 else:
-                    continue         
-        
-        if (tagId != 13127) and (category == CATEGORY_CTB):            
-            for rawDF, x, y, z in zip(rawDFs, xs, ys, zs):
-                
-                # Check exception.
-                if rawDF.shape[0] == 0: continue
-                
-                st = rawDF.index[0]
-                et = rawDF.index[-1]
-                
-                ist = st
-                iet = ist + TIME_SLOT        
-                
-                while ist < et:
-                    rawDF_ts = rawDF[ist:iet]
-                    rawDF_ts_g = rawDF_ts.groupby('antenna_id')
+                    rawDFs, xs, ys, zs = [], [], [], []
+                    category = CATEGORY_CTB
                     
-                    rssi_by_aid = {}
+                    for i in range(3):
+                        rawDFUnit = rawDF[pd.Timestamp(resDF.start.iloc[i]):pd.Timestamp(resDF.end.iloc[i])]
+                                                    
+                        rawDFs.append(rawDFUnit)
+                        x, y, z = resDF.x.iloc[i], resDF.y.iloc[i], resDF.z.iloc[i]                            
+                        xs.append(x)
+                        ys.append(y)
+                        zs.append(z)
                     
-                    for aid in list(rawDF_ts_g.groups.keys()):
-                        df = rawDF_ts_g.get_group(aid)
-                        rssi = df.rssi.median() #?
-                        rssi_by_aid[aid] = rssi
-                    
-                    aids = list(rssi_by_aid.keys())
-                    
-                    for f_id, f_aid in enumerate(aids):
-                        for s_id, s_aid in enumerate(aids):
-                            if s_id <= f_id: continue
-                            
-                            for t_id, t_aid in enumerate(aids):
-                                if t_id <= s_id: continue
-                                                        
-                                trValData = {'category': category
-                                                  , 'epc_id': tagId
-                                                  , 'start': ist
-                                                  , 'end': iet
-                                                  , 'a1_id': f_aid
-                                                  , 'a2_id': s_aid
-                                                  , 'a3_id': t_aid
-                                                  , 'rssi1': rssi_by_aid[f_aid]
-                                                  , 'rssi2': rssi_by_aid[s_aid]
-                                                  , 'rssi3': rssi_by_aid[t_aid]
-                                                  , 'x': x
-                                                  , 'y': y
-                                                  , 'z': z}
-                                
-                                trValDataDF = trValDataDF.append(pd.DataFrame(trValData))
-                    
-                    ist = iet
-                    iet = ist + TIME_SLOT                
-        else:        
+                    # Check exception.
+                    if (rawDFs[0].shape[0] == 0) and (rawDFs[1].shape[0] == 0) and (rawDFs[2].shape[0] == 0):
+                        return trValDataDF
+            else:
+                # Non-category?                    
+                return trValDataDF         
+    
+    if (tagId != 13127) and (category == CATEGORY_CTB):            
+        for rawDF, x, y, z in zip(rawDFs, xs, ys, zs):
+            
+            # Check exception.
+            if rawDF.shape[0] == 0: continue
+            
             st = rawDF.index[0]
             et = rawDF.index[-1]
             
@@ -261,27 +298,71 @@ def createTrValData(rawDataPath):
                         for t_id, t_aid in enumerate(aids):
                             if t_id <= s_id: continue
                                                     
-                            trValData = {'category': category
-                                              , 'epc_id': tagId
-                                              , 'start': ist
-                                              , 'end': iet
-                                              , 'a1_id': f_aid
-                                              , 'a2_id': s_aid
-                                              , 'a3_id': t_aid
-                                              , 'rssi1': rssi_by_aid[f_aid]
-                                              , 'rssi2': rssi_by_aid[s_aid]
-                                              , 'rssi3': rssi_by_aid[t_aid]
-                                              , 'x': x
-                                              , 'y': y
-                                              , 'z': z}
+                            trValData = {'category': [category]
+                                              , 'epc_id': [tagId]
+                                              , 'start': [ist]
+                                              , 'end': [iet]
+                                              , 'a1_id': [f_aid]
+                                              , 'a2_id': [s_aid]
+                                              , 'a3_id': [t_aid]
+                                              , 'rssi1': [rssi_by_aid[f_aid]]
+                                              , 'rssi2': [rssi_by_aid[s_aid]]
+                                              , 'rssi3': [rssi_by_aid[t_aid]]
+                                              , 'x': [x]
+                                              , 'y': [y]
+                                              , 'z': [z]}
                             
                             trValDataDF = trValDataDF.append(pd.DataFrame(trValData))
                 
                 ist = iet
-                iet = ist + TIME_SLOT
+                iet = ist + TIME_SLOT                
+    else:        
+        st = rawDF.index[0]
+        et = rawDF.index[-1]
         
-    # Save training data.
-    trValDataDF.to_csv('train.csv')    
+        ist = st
+        iet = ist + TIME_SLOT        
+        
+        while ist < et:
+            rawDF_ts = rawDF[ist:iet]
+            rawDF_ts_g = rawDF_ts.groupby('antenna_id')
+            
+            rssi_by_aid = {}
+            
+            for aid in list(rawDF_ts_g.groups.keys()):
+                df = rawDF_ts_g.get_group(aid)
+                rssi = df.rssi.median() #?
+                rssi_by_aid[aid] = rssi
+            
+            aids = list(rssi_by_aid.keys())
+            
+            for f_id, f_aid in enumerate(aids):
+                for s_id, s_aid in enumerate(aids):
+                    if s_id <= f_id: continue
+                    
+                    for t_id, t_aid in enumerate(aids):
+                        if t_id <= s_id: continue
+                                                
+                        trValData = {'category': [category]
+                                          , 'epc_id': [tagId]
+                                          , 'start': [ist]
+                                          , 'end': [iet]
+                                          , 'a1_id': [f_aid]
+                                          , 'a2_id': [s_aid]
+                                          , 'a3_id': [t_aid]
+                                          , 'rssi1': [rssi_by_aid[f_aid]]
+                                          , 'rssi2': [rssi_by_aid[s_aid]]
+                                          , 'rssi3': [rssi_by_aid[t_aid]]
+                                          , 'x': [x]
+                                          , 'y': [y]
+                                          , 'z': [z]}
+                        
+                        trValDataDF = trValDataDF.append(pd.DataFrame(trValData))
+            
+            ist = iet
+            iet = ist + TIME_SLOT 
+        
+    return trValDataDF
 
 class ISSRFIDLocator(object):
     '''
@@ -311,7 +392,7 @@ class ISSRFIDLocator(object):
 
         # Load antenna information.
         self.antennaInfoDF = pd.read_csv(os.path.join(rawDataPath, 'misc', 'antenna_locations.csv'), header=0)
-        self.antennaInfoDF = self.antennaInfoDF[1:,:]
+        self.antennaInfoDF = self.antennaInfoDF.iloc[1:,:]
         self.antennaInfoDF.index = self.antennaInfoDF.id
         self.antennaInfoDF = self.antennaInfoDF[['reader_id', 'antenna_id', 'location_x', 'location_y', 'location_z']]  
 
@@ -325,36 +406,35 @@ class ISSRFIDLocator(object):
         commLocRawDF = pd.read_csv(os.path.join(rawDataPath, 'misc', 'community_locations.txt'))
         
         # Get tag ids for each community.
-        tagsByComm = {}
+        self.tagsByComm = {}
         with open(os.path.join(rawDataPath, 'misc', 'communities.txt'), 'r') as f:
             lines = f.readlines()
             
-            for i in range(len(lines)/2):
-                commName = lines[i][0:-1]
-                tags = [int(v) for v in lines[i+1][2:-2].split(',')]
+            for i in range(int(len(lines)/2)):
+                commName = lines[i*2][0:-1]
+                tags = [int(v) for v in lines[i*2+1][1:-2].split(',')]
                 
-                tagsByComm[commName] = tags
+                self.tagsByComm[commName] = tags
         
         # Create the location table for each tag.
-        for commName in tagsByComm:
-            tags = tagsByComm[commName]
+        for commName in self.tagsByComm:
+            df = commLocRawDF[commLocRawDF.id == commName]
+            tags = self.tagsByComm[commName]
             
             for tag_id in tags:
                 
-                # Get a location and confidence.
-                df = commLocRawDF[commLocRawDF == commName]
-                
+                # Get a location and confidence.                
                 cr = CONFIDENCE_COMMUNITY_RATIO \
-                    *np.median([np.sqrt(np.power(df.x.iloc[0] - self.antennaInfoDF.iloc[i].location_x.iloc[0], 2.0) \
-                                          + np.power(df.y.iloc[0] - self.antennaInfoDF.iloc[i].location_y.iloc[0], 2.0) \
-                                          + np.power(df.z.iloc[0] - self.antennaInfoDF.iloc[i].location_z.iloc[0], 2.0)) \
+                    *np.median([np.sqrt(np.power(df.x.iloc[0] - float(self.antennaInfoDF.iloc[i].location_x), 2.0) \
+                                          + np.power(df.y.iloc[0] - float(self.antennaInfoDF.iloc[i].location_y), 2.0) \
+                                          + np.power(df.z.iloc[0] - float(self.antennaInfoDF.iloc[i].location_z), 2.0)) \
                                           for i in range(24)])
                 
-                commLocRef.append({'epc_id': tag_id
-                                   , 'x': df.x.iloc[0]
-                                   , 'y': df.y.iloc[0]
-                                   , 'z': df.z.iloc[0]
-                                   , 'cr': cr})
+                commLocRef.append({'epc_id': [tag_id]
+                                   , 'x': [df.x.iloc[0]]
+                                   , 'y': [df.y.iloc[0]]
+                                   , 'z': [df.z.iloc[0]]
+                                   , 'cr': [cr]})
         
         self.commLocRefDF = pd.DataFrame(commLocRef)
                 
@@ -381,10 +461,12 @@ class ISSRFIDLocator(object):
             print('Design the model.')
             
             # Input: 2024 x 3 (3 antenna combinations) 
-            input = Input(shape=(2024, 3))
+            x = Input(shape=(2024, 3))
             
-            x = Dense(self.hps['dense1_dim'], activation='relu', name='dense1')(input)
-            output = Dense(self.hps['dense2_dim'], activation='linear', name='dense_2')(x)
+            for i in range(hps['num_layers']):
+                x = Dense(self.hps['dense1_dim'], activation='relu', name='dense1_' + str(i))(x) #?
+            
+            output = Dense(3, activation='linear', name='dense1_last')(x)
                                             
             # Create the model.
             if IS_MULTI_GPU == True:
@@ -435,7 +517,7 @@ class ISSRFIDLocator(object):
         with open('losses.csv', 'a') as f:
             f.write('{0:f} \n'.format(lossMean))
                 
-        with open('score.csv', 'w') as f:
+        with open('loss.csv', 'w') as f:
             f.write(str(lossMean) + '\n') #?
             
         return lossMean                
@@ -569,108 +651,365 @@ class ISSRFIDLocator(object):
         
         # Load raw data.
         rawDatasDF = pd.read_csv('train.csv')
+
+        # Calculate the bias calibration factor using marker tags.
+        rawDatasDFG = rawDatasDF.groupby('epc_id')
+        xOffs, yOffs, zOffs = [], [], []
         
+        for id in self.markerIds:
+            try:
+                df = rawDatasDFG.get_group(id)
+            except Exception:
+                continue
+            
+            rssiVals = np.zeros(shape=(1,2024,3))
+            
+            for i in range(1, 4):
+                dfG = df.groupby('a' + str(i) + '_id') # Antenna id?
+                
+                # Get rssi values.
+                rssi_by_aid = {}
+                
+                for aid in list(dfG.groups.keys()):
+                    df = dfG.get_group(aid)
+                    rssi = df.loc[:, 'rssi' + str(i)].median() #?
+                    rssi_by_aid[aid] = rssi
+                
+                aids = list(rssi_by_aid.keys())
+                
+                for f_id, f_aid in enumerate(aids):
+                    for s_id, s_aid in enumerate(aids):
+                        if s_id <= f_id: continue
+                        
+                        for t_id, t_aid in enumerate(aids):
+                            if t_id <= s_id: continue        
+                            
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 0] = rssi_by_aid[f_aid] # Last value?
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
+            
+            # Predict a position.
+            pos = self.model(rssiVals) # Dimension?
+            x = np.median(pos[0, :, 0])
+            y = np.median(pos[0, :, 1])
+            z = np.median(pos[0, :, 2])
+            
+            # Calculate offset.
+            resDF = self.markerLocRefDF[self.markerLocRefDF.epc_id == id]
+            xt, yt, zt = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0] #?            
+            
+            xOffs.append(xt - x)
+            yOffs.append(yt - y)
+            zOffs.append(zt - z)
+        
+        # Check exception.
+        if len(xOffs) == 0:
+            xOff, yOff, zOff = 0., 0., 0.
+        
+        xOff, yOff, zOff = (np.median(xOffs), np.median(yOffs), np.median(zOffs))  
+
         # Training data.
+        trResults = []
         trRawDatasDF = rawDatasDF.iloc[:int(rawDatasDF.shape[0]*(1.0 - hps['val_ratio'])), :]
         
-        # Make the rssi value matrix and x, y, z matrix according to 3 antenna combinations.
-        rssiRawM = np.ndarray(shape=(31, 31, 31), dtype=np.object)
-        posRawM = np.ndarray(shape=(31, 31, 31), dtype=np.object)
-        
-        for i in range(31):
-            for j in range(31):
-                for k in range(31):
-                    rssiRawM[i,j,k] = []
-                    posRawM[i,j,k] = []
-        
-        for i in range(trRawDatasDF.shape[0]):
-            rawDataDF = trRawDatasDF.iloc[i, :]
+        # Group data according to tag id.
+        trRawDatasDFG = trRawDatasDF.groupby('epc_id')
+        tagIds = list(trRawDatasDFG.groups.keys())
+                
+        for i, id in enumerate(tagIds):
             
-            rssiRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
-            .append((rawDataDF.rssi1.iloc[0], rawDataDF.rssi2.iloc[0], rawDataDF.rssi3.iloc[0]))
+            # Predict a position and radius confidence.
+            df = trRawDatasDFG.get_group(id)
+            xt = df.x.iloc[0]
+            yt = df.y.iloc[0]
+            zt = df.z.iloc[0]
             
-            posRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
-            .append((rawDataDF.x.iloc[0], rawDataDF.y.iloc[0], rawDataDF.z.iloc[0]))
-        
-        # Extract data relevant to 3 antenna combinations.
-        rssiM = np.ndarray(shape=(2024), dtype=np.object)
-        posM = np.ndarray(shape=(2024), dtype=np.object)                                                                                               
-        
-        for i in range(2024):
-            rssiM[i] = np.asarray(rssiRawM[self.combs[i]])
-            posM[i] = np.asarray(posRawM[self.combs[i]])
+            rssiVals = np.zeros(shape=(1,2024,3))
             
-        # Adjust batch size to same size.
-        # Get maximum batch length.
-        lengths = [rssiM[i].shape[0] for i in range(24)]
-        maxLength = lengths[np.argmax(lengths)]
-        rssiMList = []
-        posMList = []
+            for i in range(1, 4):
+                dfG = df.groupby('a' + str(i) + '_id') # Antenna id?
+                
+                # Get rssi values.
+                rssi_by_aid = {}
+                
+                for aid in list(dfG.groups.keys()):
+                    df = dfG.get_group(aid)
+                    rssi = df.loc[:, 'rssi' + str(i)].median() #?
+                    rssi_by_aid[aid] = rssi
+                
+                aids = list(rssi_by_aid.keys())
+                
+                for f_id, f_aid in enumerate(aids):
+                    for s_id, s_aid in enumerate(aids):
+                        if s_id <= f_id: continue
+                        
+                        for t_id, t_aid in enumerate(aids):
+                            if t_id <= s_id: continue        
+                            
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 0] = rssi_by_aid[f_aid] # Last value?
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
             
-        for i in range(2024):
-            rssiMList.append(np.concatenate([rssiM[i], np.repeat(rssiM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
-            posMList.append(np.concatenate([posM[i], np.repeat(posM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
+            # Predict a position.
+            pos = self.model(rssiVals) # Dimension?
+            x = np.median(pos[0, :, 0])
+            y = np.median(pos[0, :, 1])
+            z = np.median(pos[0, :, 2])
+            
+            # Calibrate bias.
+            x += xOff
+            y += yOff
+            z += zOff 
+            
+            # Check a tag id category, and determine confidence.
+            category = self.__checkTagIdCategory__(id)
+            
+            # Get confidence radius.
+            if category == CATEGORY_MARKER:
+                if xOff == 0.:
+                    cr = CONFIDENCE_MARKER
+                else:
+                    cr = np.sqrt(np.power(CONFIDENCE_MARKER, 2.0) + np.power(CONFIDENCE_MARKER, 2.0)) 
+            elif category == CATEGORY_COMMUNITY:
+                if xOff == 0.:
+                    resDF = self.commLocRefDF[self.commLocRefDF.epc_id == id]
+                    cr = resDF.cr.iloc[0]
+                else:
+                    cr = np.sqrt(np.power(resDF.cr.iloc[0], 2.0) + np.power(CONFIDENCE_MARKER, 2.0))                 
+            else:
+                if xOff == 0.:
+                    cr = CONFIDENCE_CTB
+                else:
+                    cr = np.sqrt(np.power(CONFIDENCE_CTB, 2.0) + np.power(CONFIDENCE_MARKER, 2.0)) #?
+            
+            trResults.append({'category': [category]
+                            ,'epc_id': [id]
+                            , 'x': [x]
+                            , 'y': [y]
+                            , 'z': [z]
+                            , 'cr': [cr]
+                            , 'xt': [xt]
+                            , 'yt': [yt]
+                            , 'zt': [zt]})       
         
-        rssiM = np.asarray(rssiMList)
-        posM = np.asarray(posMList)
+        # Calculate score.
+        trResults = pd.DataFrame(trResults)
+        markerScores, commScores, ctbScores = [], [], []
         
-        rssiM = np.asarray([rssiM[:,:,i] for i in range(maxLength)])
-        posM = np.asarray([posM[:,:,i] for i in range(maxLength)])
+        for i in range(trResults.shape[0]):
+            category = trResults.loc[i, 'category']
+            epc_id = trResults.loc[i, 'epc_id']
+            x = trResults.loc[i, 'x']
+            y = trResults.loc[i, 'y']
+            z = trResults.loc[i, 'z']
+            cr = trResults.loc[i, 'cr']
+            xt = trResults.loc[i, 'xt']
+            yt = trResults.loc[i, 'yt']
+            zt = trResults.loc[i, 'zt']
+            
+            # Check category.
+            if category == CATEGORY_MARKER:
+                
+                # Calculate score according to category.
+                E = np.sqrt(np.power(xt - x, 2.) + np.power(yt - y, 2.) + np.power(zt - z, 2.))
+                
+                if E > cr:
+                    markerScores.append(0.0)
+                else:
+                    markerScores.append(np.min([RMIN_MARKER/(cr + 1e-7), 1.])) #?
+            elif category == CATEGORY_COMMUNITY:
+                
+                # Calculate weight.
+                for commName in list(self.tagsByComm.keys()):
+                    try:
+                        self.tagsByComm[commName].index(epc_id) #?
+                    except Exception:
+                        continue
+                    
+                    weight = 1/len(self.tagsByComm[commName])
+                    break
+                
+                # Calculate score according to category.
+                E = np.sqrt(np.power(xt - x, 2.) + np.power(yt - y, 2.) + np.power(zt - z, 2.))
+                
+                if E > cr:
+                    commScores.append(0.0)
+                else:
+                    commScores.append(weight * np.min([RMIN_COMMUNITY/(cr + 1e-7), 1.])) #?
+            else:
+                
+                # Calculate weight.
+                if epc_id == 13127:
+                    weight = 1.
+                else:
+                    weight = 1/13
+                
+                # Calculate score according to category.
+                E = np.sqrt(np.power(xt - x, 2.) + np.power(yt - y, 2.) + np.power(zt - z, 2.))
+                
+                if E > cr:
+                    ctbScores.append(0.0)
+                else:
+                    ctbScores.append(weight * np.min([RMIN_CTB/(cr + 1e-7), 1.])) #?            
         
-        tr = (rssiM, posM)
+        finalScoreTr = (np.mean(markerScores) + np.mean(commScores) + 4. * np.mean(ctbScores)) / 6. * 1000000.        
+                
+        print('Training data score {0:f}'.format(finalScoreTr))    
         
         # Validation data.
+        valResults = []
         valRawDatasDF = rawDatasDF.iloc[int(rawDatasDF.shape[0]*(1.0 - hps['val_ratio'])):, :]
-        
-        # Make the rssi value matrix and x, y, z matrix according to 3 antenna combinations.
-        rssiRawM = np.ndarray(shape=(31, 31, 31), dtype=np.object)
-        posRawM = np.ndarray(shape=(31, 31, 31), dtype=np.object)
-        
-        for i in range(31):
-            for j in range(31):
-                for k in range(31):
-                    rssiRawM[i,j,k] = []
-                    posRawM[i,j,k] = []
-        
-        for i in range(valRawDatasDF.shape[0]):
-            rawDataDF = valRawDatasDF.iloc[i, :]
+
+        # Group data according to tag id.
+        valRawDatasDFG = valRawDatasDF.groupby('epc_id')
+        tagIds = list(valRawDatasDFG.groups.keys())
+                
+        for i, id in enumerate(tagIds):
             
-            rssiRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
-            .append((rawDataDF.rssi1.iloc[0], rawDataDF.rssi2.iloc[0], rawDataDF.rssi3.iloc[0]))
+            # Predict a position and radius confidence.
+            df = valRawDatasDFG.get_group(id)
+            xt = df.x.iloc[0]
+            yt = df.y.iloc[0]
+            zt = df.z.iloc[0]
             
-            posRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
-            .append((rawDataDF.x.iloc[0], rawDataDF.y.iloc[0], rawDataDF.z.iloc[0]))
-        
-        # Extract data relevant to 3 antenna combinations.
-        rssiM = np.ndarray(shape=(2024), dtype=np.object)
-        posM = np.ndarray(shape=(2024), dtype=np.object)                                                                                               
-        
-        for i in range(2024):
-            rssiM[i] = np.asarray(rssiRawM[self.combs[i]])
-            posM[i] = np.asarray(posRawM[self.combs[i]])
+            rssiVals = np.zeros(shape=(1,2024,3))
             
-        # Adjust batch size to same size.
-        # Get maximum batch length.
-        lengths = [rssiM[i].shape[0] for i in range(24)]
-        maxLength = lengths[np.argmax(lengths)]
-        rssiMList = []
-        posMList = []
+            for i in range(1, 4):
+                dfG = df.groupby('a' + str(i) + '_id') # Antenna id?
+                
+                # Get rssi values.
+                rssi_by_aid = {}
+                
+                for aid in list(dfG.groups.keys()):
+                    df = dfG.get_group(aid)
+                    rssi = df.loc[:, 'rssi' + str(i)].median() #?
+                    rssi_by_aid[aid] = rssi
+                
+                aids = list(rssi_by_aid.keys())
+                
+                for f_id, f_aid in enumerate(aids):
+                    for s_id, s_aid in enumerate(aids):
+                        if s_id <= f_id: continue
+                        
+                        for t_id, t_aid in enumerate(aids):
+                            if t_id <= s_id: continue        
+                            
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 0] = rssi_by_aid[f_aid] # Last value?
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
             
-        for i in range(2024):
-            rssiMList.append(np.concatenate([rssiM[i], np.repeat(rssiM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
-            posMList.append(np.concatenate([posM[i], np.repeat(posM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
-        
-        rssiM = np.asarray(rssiMList)
-        posM = np.asarray(posMList)
-        
-        rssiM = np.asarray([rssiM[:,:,i] for i in range(maxLength)])
-        posM = np.asarray([posM[:,:,i] for i in range(maxLength)])
-        
-        val = (rssiM, posM)                
-        
-        
-        
+            # Predict a position.
+            pos = self.model(rssiVals) # Dimension?
+            x = np.median(pos[0, :, 0])
+            y = np.median(pos[0, :, 1])
+            z = np.median(pos[0, :, 2])
             
+            # Calibrate bias.
+            x += xOff
+            y += yOff
+            z += zOff 
+            
+            # Check a tag id category, and determine confidence.
+            category = self.__checkTagIdCategory__(id)
+            
+            # Get confidence radius.
+            if category == CATEGORY_MARKER:
+                if xOff == 0.:
+                    cr = CONFIDENCE_MARKER
+                else:
+                    cr = np.sqrt(np.power(CONFIDENCE_MARKER, 2.0) + np.power(CONFIDENCE_MARKER, 2.0)) 
+            elif category == CATEGORY_COMMUNITY:
+                if xOff == 0.:
+                    resDF = self.commLocRefDF[self.commLocRefDF.epc_id == id]
+                    cr = resDF.cr.iloc[0]
+                else:
+                    cr = np.sqrt(np.power(resDF.cr.iloc[0], 2.0) + np.power(CONFIDENCE_MARKER, 2.0))                 
+            else:
+                if xOff == 0.:
+                    cr = CONFIDENCE_CTB
+                else:
+                    cr = np.sqrt(np.power(CONFIDENCE_CTB, 2.0) + np.power(CONFIDENCE_MARKER, 2.0)) #?
+            
+            valResults.append({'category': [category]
+                            ,'epc_id': [id]
+                            , 'x': [x]
+                            , 'y': [y]
+                            , 'z': [z]
+                            , 'cr': [cr]
+                            , 'xt': [xt]
+                            , 'yt': [yt]
+                            , 'zt': [zt]})       
+        
+        # Calculate score.
+        valResults = pd.DataFrame(valResults)
+        markerScores, commScores, ctbScores = [], [], []
+        
+        for i in range(valResults.shape[0]):
+            category = valResults.loc[i, 'category']
+            epc_id = valResults.loc[i, 'epc_id']
+            x = valResults.loc[i, 'x']
+            y = valResults.loc[i, 'y']
+            z = valResults.loc[i, 'z']
+            cr = valResults.loc[i, 'cr']
+            xt = valResults.loc[i, 'xt']
+            yt = valResults.loc[i, 'yt']
+            zt = valResults.loc[i, 'zt']
+            
+            # Check category.
+            if category == CATEGORY_MARKER:
+                
+                # Calculate score according to category.
+                E = np.sqrt(np.power(xt - x, 2.) + np.power(yt - y, 2.) + np.power(zt - z, 2.))
+                
+                if E > cr:
+                    markerScores.append(0.0)
+                else:
+                    markerScores.append(np.min([RMIN_MARKER/(cr + 1e-7), 1.])) #?
+            elif category == CATEGORY_COMMUNITY:
+                
+                # Calculate weight.
+                for commName in list(self.tagsByComm.keys()):
+                    try:
+                        self.tagsByComm[commName].index(epc_id) #?
+                    except Exception:
+                        continue
+                    
+                    weight = 1/len(self.tagsByComm[commName])
+                    break
+                
+                # Calculate score according to category.
+                E = np.sqrt(np.power(xt - x, 2.) + np.power(yt - y, 2.) + np.power(zt - z, 2.))
+                
+                if E > cr:
+                    commScores.append(0.0)
+                else:
+                    commScores.append(weight * np.min([RMIN_COMMUNITY/(cr + 1e-7), 1.])) #?
+            else:
+                
+                # Calculate weight.
+                if epc_id == 13127:
+                    weight = 1.
+                else:
+                    weight = 1/13
+                
+                # Calculate score according to category.
+                E = np.sqrt(np.power(xt - x, 2.) + np.power(yt - y, 2.) + np.power(zt - z, 2.))
+                
+                if E > cr:
+                    ctbScores.append(0.0)
+                else:
+                    ctbScores.append(weight * np.min([RMIN_CTB/(cr + 1e-7), 1.])) #?            
+        
+        finalScoreVal = (np.mean(markerScores) + np.mean(commScores) + 4. * np.mean(ctbScores)) / 6. * 1000000.        
+                
+        print('Training data score {0:f}'.format(finalScoreVal))         
+        
+        # Save final scores.
+        finalScoreDF = pd.DataFrame({'final_score_tr': [finalScoreTr], 'final_score_val': [finalScoreVal]})
+        finalScoreDF.to_csv('final_scores.csv') #?
+        
+        return (finalScoreTr, finalScoreVal)
+                    
     def test(self, hps, modelLoading = True):
         '''
             Test.
@@ -737,7 +1076,12 @@ class ISSRFIDLocator(object):
                 cr = CONFIDENCE_MARKER
                 x, y, z = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0] #?
                 
-                results.append({'task-id': taskId, 'epc_id': id, 'x': x, 'y': y, 'z': z, 'confidence_radius': cr})
+                results.append({'task-id': [taskId]
+                                , 'epc_id': [id]
+                                , 'x': [x]
+                                , 'y': [y]
+                                , 'z': [z]
+                                , 'cr': [cr]})
             elif category == CATEGORY_COMMUNITY:
                 
                 # Get the position of a community tag.
@@ -746,7 +1090,12 @@ class ISSRFIDLocator(object):
                 x, y, z = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0] #?
                 cr = resDF.cr.iloc[0]
                 
-                results.append({'task-id': taskId, 'epc_id': id, 'x': x, 'y': y, 'z': z, 'confidence_radius': cr})                
+                results.append({'task-id': [taskId]
+                                , 'epc_id': [id]
+                                , 'x': [x]
+                                , 'y': [y]
+                                , 'z': [z]
+                                , 'cr': [cr]})                
             else:
                 
                 # Predict a position and radius confidence.
@@ -792,7 +1141,12 @@ class ISSRFIDLocator(object):
                 else:
                     cr = np.sqrt(np.power(CONFIDENCE_CTB, 2.0) + np.power(CONFIDENCE_MARKER, 2.0)) #?
                 
-                results.append({'task-id': taskId, 'epc_id': id, 'x': x, 'y': y, 'z': z, 'confidence_radius': cr})
+                results.append({'task-id': [taskId]
+                                , 'epc_id': [id]
+                                , 'x': [x]
+                                , 'y': [y]
+                                , 'z': [z]
+                                , 'cr': [cr]})
         
         return pd.DataFrame(results)
     
@@ -810,14 +1164,14 @@ class ISSRFIDLocator(object):
             except Exception:
                 continue
             
-            df = df.sort_values(by=2)
+            dfG = df.groupby(2) # Antenna id?
             
             # Get rssi values.
             rssiVals = np.zeros(shape=(1,2024,3))
             rssi_by_aid = {}
             
-            for aid in list(taskRFIDDataDFG .groups.keys()):
-                df = taskRFIDDataDFG.get_group(aid)
+            for aid in list(dfG.groups.keys()):
+                df = dfG.get_group(aid)
                 rssi = df.rssi.median() #?
                 rssi_by_aid[aid] = rssi
             
@@ -883,6 +1237,110 @@ class ISSRFIDLocator(object):
                     category = CATEGORY_NONE
 
         return category
+
+def main(args):
+    '''
+        Main.
+        @param args: Arguments.
+    '''
+    
+    hps = {}
+    
+    if args.mode == 'data':
+        
+        # Get arguments.
+        rawDataPath = args.raw_data_path
+        
+        # Create training and validation data.
+        createTrValData(rawDataPath)
+    elif args.mode == 'train':
+        
+        # Get arguments.
+        rawDataPath = args.raw_data_path
+        
+        # hps.
+        hps['num_layers'] = int(args.num_layers)
+        hps['dense1_dim'] = int(args.dense1_dim)
+        hps['dropout1_rate'] = float(args.dropout1_rate)
+        hps['lr'] = float(args.lr)
+        hps['beta_1'] = float(args.beta_1)
+        hps['beta_2'] = float(args.beta_2)
+        hps['decay'] = float(args.decay) 
+        hps['epochs'] = int(args.epochs) 
+        hps['batch_size'] = int(args.batch_size) 
+        hps['val_ratio'] = float(args.val_ratio)
+        
+        modelLoading = False if int(args.model_load) == 0 else True        
+        
+        # Train.
+        rfidLocator = ISSRFIDLocator(rawDataPath)
+        
+        rfidLocator.train(hps, modelLoading)
+    elif args.mode == 'evaluate':
+        
+        # Get arguments.
+        rawDataPath = args.raw_data_path
+        
+        # hps.
+        hps['num_layers'] = int(args.num_layers)
+        hps['dense1_dim'] = int(args.dense1_dim)
+        hps['dropout1_rate'] = float(args.dropout1_rate)
+        hps['lr'] = float(args.lr)
+        hps['beta_1'] = float(args.beta_1)
+        hps['beta_2'] = float(args.beta_2)
+        hps['decay'] = float(args.decay) 
+        hps['epochs'] = int(args.epochs) 
+        hps['batch_size'] = int(args.batch_size) 
+        hps['val_ratio'] = float(args.val_ratio)
+        
+        modelLoading = False if int(args.model_load) == 0 else True        
+        
+        # Train.
+        rfidLocator = ISSRFIDLocator(rawDataPath)
+        
+        rfidLocator.evaluate(hps, modelLoading) #?
+    elif args.mode == 'test':
+        
+         # Get arguments.
+        rawDataPath = args.raw_data_path
+        
+        # hps.
+        hps['num_layers'] = int(args.num_layers)
+        hps['dense1_dim'] = int(args.dense1_dim)
+        hps['dropout1_rate'] = float(args.dropout1_rate)
+        hps['lr'] = float(args.lr)
+        hps['beta_1'] = float(args.beta_1)
+        hps['beta_2'] = float(args.beta_2)
+        hps['decay'] = float(args.decay) 
+        hps['epochs'] = int(args.epochs) 
+        hps['batch_size'] = int(args.batch_size) 
+        hps['val_ratio'] = float(args.val_ratio)
+        
+        modelLoading = False if int(args.model_load) == 0 else True        
+        
+        # Train.
+        rfidLocator = ISSRFIDLocator(rawDataPath)
+        
+        rfidLocator.test(hps, modelLoading) #?           
         
 if __name__ == '__main__':
-    pass
+    
+    # Parse arguments.
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument('--mode')
+    parser.add_argument('--raw_data_path')
+    parser.add_argument('--num_layers')
+    parser.add_argument('--dense1_dim')
+    parser.add_argument('--dropout1_rate')
+    parser.add_argument('--lr')
+    parser.add_argument('--beta_1')
+    parser.add_argument('--beta_2')
+    parser.add_argument('--decay')
+    parser.add_argument('--epochs')
+    parser.add_argument('--batch_size')
+    parser.add_argument('--val_ratio')
+    parser.add_argument('--model_load')
+    args = parser.parse_args()
+    
+    main(args)
