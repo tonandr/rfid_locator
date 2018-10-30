@@ -40,20 +40,13 @@ def optimizeViaSA(rawDataPath, hps, modelLoading):
     mean = np.zeros(numHps, dtype=np.float32)
         
     # Initial state.
-    isPass = False
-    
-    while isPass == False:
-        hpState = np.random.multivariate_normal(mean, covar)
-        
-        if (0.0 <= hpState[0]) and (hpState[0] <= 1.0) and \
-            (0.0 <= hpState[1]) and (hpState[1] <= 1.0):
-            isPass = True
+    hpState = np.random.multivariate_normal(mean, covar)
     
     # dense1_dim: 8 ~ 1024.
-    hps['dense1_dim'] = int(np.maximum(np.minimum(np.abs(hpState[0])*1024, 1024), 8))
+    hps['dense1_dim'] = int(np.maximum(np.minimum(np.abs(hpState[0])*400, 1024), 8))
     
     # num_layer: 1 ~ 12.
-    hps['num_layer'] = int(np.maximum(np.minimum(np.abs(hpState[1]*12), 12), 1))
+    hps['num_layer'] = int(np.maximum(np.minimum(np.abs(hpState[1])*4, 12), 1))
                     
     preHpState = hpState
         
@@ -112,20 +105,13 @@ def optimizeViaSA(rawDataPath, hps, modelLoading):
         covar = np.identity(numHps, dtype=np.float32) * t #?
     
         # Sample a current state and get a current score.
-        isPass = False
-    
-        while isPass == False:
-            proHpState = np.random.multivariate_normal(preHpState, covar)
-        
-            if (0.0 <= proHpState[0]) and (proHpState[0] <= 1.0) and \
-                (0.0 <= proHpState[1]) and (proHpState[1] <= 1.0):
-                isPass = True
+        proHpState = np.random.multivariate_normal(preHpState, covar)
         
         # dense1_dim: 8 ~ 1024.
-        hps['dense1_dim'] = int(np.maximum(np.minimum(np.abs(proHpState[0])*1024, 1024), 8))
+        hps['dense1_dim'] = int(np.maximum(np.minimum(np.abs(proHpState[0])*400, 1024), 8))
         
         # num_layer: 1 ~ 12.
-        hps['num_layer'] = int(np.maximum(np.minimum(np.abs(proHpState[1]*12), 12), 1))
+        hps['num_layer'] = int(np.maximum(np.minimum(np.abs(proHpState[1])*4, 12), 1))
                         
         preHpState = proHpState
             

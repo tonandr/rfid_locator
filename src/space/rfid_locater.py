@@ -437,6 +437,34 @@ class ISSRFIDLocator(object):
                                    , 'cr': [cr]})
         
         self.commLocRefDF = pd.DataFrame(commLocRef)
+
+        # CTB.
+        self.ctbLocRefDF = pd.DataFrame(columns = ['epc_id','x', 'y', 'z', 'start', 'end'])
+        ctbLocRawDF = pd.read_csv(os.path.join(rawDataPath, 'misc', 'ctb_locations.txt'))
+        
+        # Get tag ids for each ctb and time slot.
+        tagsByctb = {}
+        with open(os.path.join(rawDataPath, 'misc', 'ctb_tags.txt'), 'r') as f:
+            lines = f.readlines()
+            
+            for i in range(int(len(lines)/2)):
+                ctbName = lines[i*2][0:-1]
+                tags = [int(v) for v in lines[i*2+1][1:-2].split(',')]
+                
+                tagsByctb[ctbName] = tags
+        
+        # Create the location and time slot table for each tag.
+        for ctbName in tagsByctb:
+            tags = tagsByctb[ctbName]
+            
+            for tag_id in tags:
+                
+                # Get location and time slot.
+                df = ctbLocRawDF[ctbLocRawDF.id == int(ctbName)]
+                df = df[['x', 'y', 'z', 'start', 'end']]
+                df.index = [idx for idx in range(df.shape[0])]
+                df = pd.concat([pd.Series([tag_id for _ in range(df.shape[0])], name='epc_id'), df], axis = 1)
+                self.ctbLocRefDF = self.ctbLocRefDF.append(df)
                 
     def train(self, hps, modelLoading = False):
         '''
@@ -461,9 +489,10 @@ class ISSRFIDLocator(object):
             print('Design the model.')
             
             # Input: 2024 x 3 (3 antenna combinations) 
-            x = Input(shape=(2024, 3))
+            input = Input(shape=(2024, 3))
+            x = Dense(self.hps['dense1_dim'], activation='relu', name='dense1_' + str(0))(input) #?
             
-            for i in range(hps['num_layers']):
+            for i in range(1, hps['num_layers']):
                 x = Dense(self.hps['dense1_dim'], activation='relu', name='dense1_' + str(i))(x) #?
             
             output = Dense(3, activation='linear', name='dense1_last')(x)
@@ -529,8 +558,9 @@ class ISSRFIDLocator(object):
         '''
         
         # Load raw data.
+        '''
         rawDatasDF = pd.read_csv('train.csv')
-        
+
         # Training data.
         trRawDatasDF = rawDatasDF.iloc[:int(rawDatasDF.shape[0]*(1.0 - hps['val_ratio'])), :]
         
@@ -547,12 +577,12 @@ class ISSRFIDLocator(object):
         for i in range(trRawDatasDF.shape[0]):
             rawDataDF = trRawDatasDF.iloc[i, :]
             
-            rssiRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
-            .append((rawDataDF.rssi1.iloc[0], rawDataDF.rssi2.iloc[0], rawDataDF.rssi3.iloc[0]))
+            rssiRawM[rawDataDF.a1_id, rawDataDF.a2_id, rawDataDF.a3_id]\
+            .append((rawDataDF.rssi1, rawDataDF.rssi2, rawDataDF.rssi3))
             
-            posRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
-            .append((rawDataDF.x.iloc[0], rawDataDF.y.iloc[0], rawDataDF.z.iloc[0]))
-        
+            posRawM[rawDataDF.a1_id, rawDataDF.a2_id, rawDataDF.a3_id]\
+            .append((rawDataDF.x, rawDataDF.y, rawDataDF.z))
+                
         # Extract data relevant to 3 antenna combinations.
         rssiM = np.ndarray(shape=(2024), dtype=np.object)
         posM = np.ndarray(shape=(2024), dtype=np.object)                                                                                               
@@ -563,14 +593,26 @@ class ISSRFIDLocator(object):
             
         # Adjust batch size to same size.
         # Get maximum batch length.
-        lengths = [rssiM[i].shape[0] for i in range(24)]
+        lengths = [rssiM[i].shape[0] for i in range(2024)]
         maxLength = lengths[np.argmax(lengths)]
         rssiMList = []
         posMList = []
             
         for i in range(2024):
-            rssiMList.append(np.concatenate([rssiM[i], np.repeat(rssiM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
-            posMList.append(np.concatenate([posM[i], np.repeat(posM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
+            
+            # Check and process exception.
+            if rssiM[i].shape[0] == 0:
+                rssiMList.append(np.zeros(shape=(maxLength, 3)).T)
+                posMList.append(np.zeros(shape=(maxLength, 3)).T) 
+            else:
+                rssiMList.append(np.concatenate([rssiM[i]
+                                                 , np.repeat(rssiM[i][-1,:][np.newaxis, :]
+                                                             , (maxLength - rssiM[i].shape[0])
+                                                             , axis=0)]).T)
+                posMList.append(np.concatenate([posM[i]
+                                                , np.repeat(posM[i][-1,:][np.newaxis, :]
+                                                            , (maxLength - rssiM[i].shape[0])
+                                                            , axis=0)]).T)
         
         rssiM = np.asarray(rssiMList)
         posM = np.asarray(posMList)
@@ -578,9 +620,18 @@ class ISSRFIDLocator(object):
         rssiM = np.asarray([rssiM[:,:,i] for i in range(maxLength)])
         posM = np.asarray([posM[:,:,i] for i in range(maxLength)])
         
+        # Save data.
+        rssiM.tofile('rssiM_tr.nd')
+        posM.tofile('posM_tr.nd')
+        '''
+        
+        rssiM = np.fromfile('rssiM_tr.nd').reshape((5028, 2024, 3))
+        posM = np.fromfile('posM_tr.nd').reshape((5028, 2024, 3))
+        
         tr = (rssiM, posM)
         
         # Validation data.
+        '''
         valRawDatasDF = rawDatasDF.iloc[int(rawDatasDF.shape[0]*(1.0 - hps['val_ratio'])):, :]
         
         # Make the rssi value matrix and x, y, z matrix according to 3 antenna combinations.
@@ -596,11 +647,11 @@ class ISSRFIDLocator(object):
         for i in range(valRawDatasDF.shape[0]):
             rawDataDF = valRawDatasDF.iloc[i, :]
             
-            rssiRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
-            .append((rawDataDF.rssi1.iloc[0], rawDataDF.rssi2.iloc[0], rawDataDF.rssi3.iloc[0]))
+            rssiRawM[rawDataDF.a1_id, rawDataDF.a2_id, rawDataDF.a3_id]\
+            .append((rawDataDF.rssi1, rawDataDF.rssi2, rawDataDF.rssi3))
             
-            posRawM[rawDataDF.a1_id.iloc[0], rawDataDF.a2_id.iloc[0], rawDataDF.a3_id.iloc[0]]\
-            .append((rawDataDF.x.iloc[0], rawDataDF.y.iloc[0], rawDataDF.z.iloc[0]))
+            posRawM[rawDataDF.a1_id, rawDataDF.a2_id, rawDataDF.a3_id]\
+            .append((rawDataDF.x, rawDataDF.y, rawDataDF.z))
         
         # Extract data relevant to 3 antenna combinations.
         rssiM = np.ndarray(shape=(2024), dtype=np.object)
@@ -612,20 +663,40 @@ class ISSRFIDLocator(object):
             
         # Adjust batch size to same size.
         # Get maximum batch length.
-        lengths = [rssiM[i].shape[0] for i in range(24)]
+        lengths = [rssiM[i].shape[0] for i in range(2024)]
         maxLength = lengths[np.argmax(lengths)]
         rssiMList = []
         posMList = []
             
         for i in range(2024):
-            rssiMList.append(np.concatenate([rssiM[i], np.repeat(rssiM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
-            posMList.append(np.concatenate([posM[i], np.repeat(posM[i][-1,:][np.newaxis, :], (maxLength - rssiM[i].shape[0]))]).T)
+            
+            # Check and process exception.
+            if rssiM[i].shape[0] == 0:
+                rssiMList.append(np.zeros(shape=(maxLength, 3)).T)
+                posMList.append(np.zeros(shape=(maxLength, 3)).T) 
+            else:
+                rssiMList.append(np.concatenate([rssiM[i]
+                                                 , np.repeat(rssiM[i][-1,:][np.newaxis, :]
+                                                             , (maxLength - rssiM[i].shape[0])
+                                                             , axis=0)]).T)
+                posMList.append(np.concatenate([posM[i]
+                                                , np.repeat(posM[i][-1,:][np.newaxis, :]
+                                                            , (maxLength - rssiM[i].shape[0])
+                                                            , axis=0)]).T)
         
         rssiM = np.asarray(rssiMList)
         posM = np.asarray(posMList)
         
         rssiM = np.asarray([rssiM[:,:,i] for i in range(maxLength)])
         posM = np.asarray([posM[:,:,i] for i in range(maxLength)])
+        
+        # Save data.
+        rssiM.tofile('rssiM_val.nd')
+        posM.tofile('posM_val.nd')
+        '''
+        
+        rssiM = np.fromfile('rssiM_val.nd').reshape((948, 2024, 3))
+        posM = np.fromfile('posM_val.nd').reshape((948, 2024, 3))
         
         val = (rssiM, posM)        
         
@@ -689,7 +760,7 @@ class ISSRFIDLocator(object):
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
             
             # Predict a position.
-            pos = self.model(rssiVals) # Dimension?
+            pos = self.model.predict(rssiVals) # Dimension?
             x = np.median(pos[0, :, 0])
             y = np.median(pos[0, :, 1])
             z = np.median(pos[0, :, 2])
@@ -751,7 +822,7 @@ class ISSRFIDLocator(object):
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
             
             # Predict a position.
-            pos = self.model(rssiVals) # Dimension?
+            pos = self.model.predict(rssiVals) # Dimension?
             x = np.median(pos[0, :, 0])
             y = np.median(pos[0, :, 1])
             z = np.median(pos[0, :, 2])
@@ -782,15 +853,15 @@ class ISSRFIDLocator(object):
                 else:
                     cr = np.sqrt(np.power(CONFIDENCE_CTB, 2.0) + np.power(CONFIDENCE_MARKER, 2.0)) #?
             
-            trResults.append({'category': [category]
-                            ,'epc_id': [id]
-                            , 'x': [x]
-                            , 'y': [y]
-                            , 'z': [z]
-                            , 'cr': [cr]
-                            , 'xt': [xt]
-                            , 'yt': [yt]
-                            , 'zt': [zt]})       
+            trResults.append({'category': category
+                            ,'epc_id': id
+                            , 'x': x
+                            , 'y': y
+                            , 'z': z
+                            , 'cr': cr
+                            , 'xt': xt
+                            , 'yt': yt
+                            , 'zt': zt})       
         
         # Calculate score.
         trResults = pd.DataFrame(trResults)
@@ -852,7 +923,15 @@ class ISSRFIDLocator(object):
                 else:
                     ctbScores.append(weight * np.min([RMIN_CTB/(cr + 1e-7), 1.])) #?            
         
-        finalScoreTr = (np.mean(markerScores) + np.mean(commScores) + 4. * np.mean(ctbScores)) / 6. * 1000000.        
+        # Check exception.
+        if len(markerScores) == 0:
+            markerScores.append(0.)
+        if len(commScores) == 0:
+            commScores.append(0.)
+        if len(ctbScores) == 0:
+            commScores.append(0.)
+        
+        finalScoreTr = (np.asarray(markerScores).mean() + np.asarray(commScores).mean() + 4. * np.asarray(ctbScores).mean()) / 6. * 1000000.        
                 
         print('Training data score {0:f}'.format(finalScoreTr))    
         
@@ -899,7 +978,7 @@ class ISSRFIDLocator(object):
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
             
             # Predict a position.
-            pos = self.model(rssiVals) # Dimension?
+            pos = self.model.predict(rssiVals) # Dimension?
             x = np.median(pos[0, :, 0])
             y = np.median(pos[0, :, 1])
             z = np.median(pos[0, :, 2])
@@ -930,15 +1009,15 @@ class ISSRFIDLocator(object):
                 else:
                     cr = np.sqrt(np.power(CONFIDENCE_CTB, 2.0) + np.power(CONFIDENCE_MARKER, 2.0)) #?
             
-            valResults.append({'category': [category]
-                            ,'epc_id': [id]
-                            , 'x': [x]
-                            , 'y': [y]
-                            , 'z': [z]
-                            , 'cr': [cr]
-                            , 'xt': [xt]
-                            , 'yt': [yt]
-                            , 'zt': [zt]})       
+            valResults.append({'category': category
+                            ,'epc_id': id
+                            , 'x': x
+                            , 'y': y
+                            , 'z': z
+                            , 'cr': cr
+                            , 'xt': xt
+                            , 'yt': yt
+                            , 'zt': zt})       
         
         # Calculate score.
         valResults = pd.DataFrame(valResults)
@@ -999,8 +1078,16 @@ class ISSRFIDLocator(object):
                     ctbScores.append(0.0)
                 else:
                     ctbScores.append(weight * np.min([RMIN_CTB/(cr + 1e-7), 1.])) #?            
-        
-        finalScoreVal = (np.mean(markerScores) + np.mean(commScores) + 4. * np.mean(ctbScores)) / 6. * 1000000.        
+
+        # Check exception.
+        if len(markerScores) == 0:
+            markerScores.append(0.)
+        if len(commScores) == 0:
+            commScores.append(0.)
+        if len(ctbScores) == 0:
+            commScores.append(0.)
+
+        finalScoreVal = (np.asarray(markerScores).mean() + np.asarray(commScores).mean() + 4. * np.asarray(ctbScores).mean()) / 6. * 1000000.        
                 
         print('Training data score {0:f}'.format(finalScoreVal))         
         
@@ -1039,16 +1126,16 @@ class ISSRFIDLocator(object):
                                                   , header=None).iloc[:,0])
             taskRFIDDataDF = pd.read_csv(os.path.join(self.rawDataPath
                                                   , 'tasks', 'rfid_raw_task-' + numStr + '.txt')
-                                                  , sep=','
+                                                  , sep='\t'
                                                   , header=None)
             
-            if i == 0:
-                predResultDF = self.predictRFIDLocations(taskTagIds, taskRFIDDataDF)
+            if i == 1:
+                predResultDF = self.predictRFIDLocations(i, taskTagIds, taskRFIDDataDF)
             else:
-                predResultDF = predResultDF.append(self.predictRFIDLocations(taskTagIds, taskRFIDDataDF))
+                predResultDF = predResultDF.append(self.predictRFIDLocations(i, taskTagIds, taskRFIDDataDF))
         
         # Save.
-        predResultDF.to_csv('iss_rfid_location_result.txt') #?
+        predResultDF.to_csv('iss_rfid_location_result.txt', header=0) #?
             
     def predictRFIDLocations(self, taskId, taskTagIds, taskRFIDDataDF):
         '''
@@ -1074,41 +1161,45 @@ class ISSRFIDLocator(object):
                 # Get the position of a marker tag.
                 resDF = self.markerLocRefDF[self.markerLocRefDF.epc_id == id]
                 cr = CONFIDENCE_MARKER
-                x, y, z = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0] #?
+                x, y, z = float(resDF.x.iloc[0]), float(resDF.y.iloc[0]), float(resDF.z.iloc[0]) #?
                 
-                results.append({'task-id': [taskId]
-                                , 'epc_id': [id]
-                                , 'x': [x]
-                                , 'y': [y]
-                                , 'z': [z]
-                                , 'cr': [cr]})
+                results.append({'task-id': taskId
+                                , 'epc_id': id
+                                , 'x': x
+                                , 'y': y
+                                , 'z': z
+                                , 'cr': cr})
             elif category == CATEGORY_COMMUNITY:
                 
                 # Get the position of a community tag.
                 resDF = self.commLocRefDF[self.commLocRefDF.epc_id == id]
                 
-                x, y, z = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0] #?
+                x, y, z = float(resDF.x.iloc[0]), float(resDF.y.iloc[0]), float(resDF.z.iloc[0]) #?
                 cr = resDF.cr.iloc[0]
                 
-                results.append({'task-id': [taskId]
-                                , 'epc_id': [id]
-                                , 'x': [x]
-                                , 'y': [y]
-                                , 'z': [z]
-                                , 'cr': [cr]})                
+                results.append({'task-id': taskId
+                                , 'epc_id': id
+                                , 'x': x
+                                , 'y': y
+                                , 'z': z
+                                , 'cr': cr})                
             else:
                 
                 # Predict a position and radius confidence.
-                df = taskRFIDDataDFG.get_group(id)
-                df = df.sort_values(by=2) 
+                try:
+                    df = taskRFIDDataDFG.get_group(id) # No signal?
+                except Exception:
+                    continue
+                
+                dfG = df.groupby(2) # Antenna id. #?
                    
                 # Get rssi values.
                 rssiVals = np.zeros(shape=(1,2024,3))    
                 rssi_by_aid = {}
                 
-                for aid in list(taskRFIDDataDFG .groups.keys()):
-                    df = taskRFIDDataDFG.get_group(aid)
-                    rssi = df.rssi.median() #?
+                for aid in list(dfG.groups.keys()):
+                    df = dfG.get_group(aid)
+                    rssi = df.loc[:, 3].median() #?
                     rssi_by_aid[aid] = rssi
                 
                 aids = list(rssi_by_aid.keys())
@@ -1125,7 +1216,7 @@ class ISSRFIDLocator(object):
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
                 
                 # Predict a position.
-                pos = self.model(rssiVals) # Dimension?
+                pos = self.model.predict(rssiVals) # Dimension?
                 x = np.median(pos[0, :, 0])
                 y = np.median(pos[0, :, 1])
                 z = np.median(pos[0, :, 2])
@@ -1141,12 +1232,12 @@ class ISSRFIDLocator(object):
                 else:
                     cr = np.sqrt(np.power(CONFIDENCE_CTB, 2.0) + np.power(CONFIDENCE_MARKER, 2.0)) #?
                 
-                results.append({'task-id': [taskId]
-                                , 'epc_id': [id]
-                                , 'x': [x]
-                                , 'y': [y]
-                                , 'z': [z]
-                                , 'cr': [cr]})
+                results.append({'task-id': taskId
+                                , 'epc_id': id
+                                , 'x': x
+                                , 'y': y
+                                , 'z': z
+                                , 'cr': cr})
         
         return pd.DataFrame(results)
     
@@ -1172,7 +1263,7 @@ class ISSRFIDLocator(object):
             
             for aid in list(dfG.groups.keys()):
                 df = dfG.get_group(aid)
-                rssi = df.rssi.median() #?
+                rssi = df.loc[:, 3].median() #?
                 rssi_by_aid[aid] = rssi
             
             aids = list(rssi_by_aid.keys())
@@ -1189,7 +1280,7 @@ class ISSRFIDLocator(object):
                         rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
             
             # Predict a position.
-            pos = self.model(rssiVals) # Dimension?
+            pos = self.model.predict(rssiVals) # Dimension?
             x = np.median(pos[0, :, 0])
             y = np.median(pos[0, :, 1])
             z = np.median(pos[0, :, 2])
