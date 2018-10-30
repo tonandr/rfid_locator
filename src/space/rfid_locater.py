@@ -734,6 +734,7 @@ class ISSRFIDLocator(object):
                 continue
             
             rssiVals = np.zeros(shape=(1,2024,3))
+            valIndexes = set()
             
             for i in range(1, 4):
                 dfG = df.groupby('a' + str(i) + '_id') # Antenna id?
@@ -758,12 +759,15 @@ class ISSRFIDLocator(object):
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 0] = rssi_by_aid[f_aid] # Last value?
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
+                            
+                            valIndexes.add(self.combs.index((f_aid, s_aid, t_aid)))
             
             # Predict a position.
+            valIndexes = list(valIndexes)
             pos = self.model.predict(rssiVals) # Dimension?
-            x = np.median(pos[0, :, 0])
-            y = np.median(pos[0, :, 1])
-            z = np.median(pos[0, :, 2])
+            x = np.median(pos[0, valIndexes, 0])
+            y = np.median(pos[0, valIndexes, 1])
+            z = np.median(pos[0, valIndexes, 2])
             
             # Calculate offset.
             resDF = self.markerLocRefDF[self.markerLocRefDF.epc_id == id]
@@ -809,6 +813,7 @@ class ISSRFIDLocator(object):
                     rssi_by_aid[aid] = rssi
                 
                 aids = list(rssi_by_aid.keys())
+                valIndexes = set()
                 
                 for f_id, f_aid in enumerate(aids):
                     for s_id, s_aid in enumerate(aids):
@@ -820,12 +825,15 @@ class ISSRFIDLocator(object):
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 0] = rssi_by_aid[f_aid] # Last value?
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
+                            
+                            valIndexes.add(self.combs.index((f_aid, s_aid, t_aid)))
             
             # Predict a position.
+            valIndexes = list(valIndexes)
             pos = self.model.predict(rssiVals) # Dimension?
-            x = np.median(pos[0, :, 0])
-            y = np.median(pos[0, :, 1])
-            z = np.median(pos[0, :, 2])
+            x = np.median(pos[0, valIndexes, 0])
+            y = np.median(pos[0, valIndexes, 1])
+            z = np.median(pos[0, valIndexes, 2])
             
             # Calibrate bias.
             x += xOff
@@ -965,6 +973,7 @@ class ISSRFIDLocator(object):
                     rssi_by_aid[aid] = rssi
                 
                 aids = list(rssi_by_aid.keys())
+                valIndexes = set()
                 
                 for f_id, f_aid in enumerate(aids):
                     for s_id, s_aid in enumerate(aids):
@@ -976,12 +985,15 @@ class ISSRFIDLocator(object):
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 0] = rssi_by_aid[f_aid] # Last value?
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
+                            
+                            valIndexes.add(self.combs.index((f_aid, s_aid, t_aid)))
             
             # Predict a position.
+            valIndexes = list(valIndexes)
             pos = self.model.predict(rssiVals) # Dimension?
-            x = np.median(pos[0, :, 0])
-            y = np.median(pos[0, :, 1])
-            z = np.median(pos[0, :, 2])
+            x = np.median(pos[0, valIndexes, 0])
+            y = np.median(pos[0, valIndexes, 1])
+            z = np.median(pos[0, valIndexes, 2])
             
             # Calibrate bias.
             x += xOff
@@ -1203,6 +1215,7 @@ class ISSRFIDLocator(object):
                     rssi_by_aid[aid] = rssi
                 
                 aids = list(rssi_by_aid.keys())
+                valIndexes = set()
                 
                 for f_id, f_aid in enumerate(aids):
                     for s_id, s_aid in enumerate(aids):
@@ -1215,11 +1228,14 @@ class ISSRFIDLocator(object):
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
                 
+                            valIndexes.add(self.combs.index((f_aid, s_aid, t_aid)))
+            
                 # Predict a position.
+                valIndexes = list(valIndexes)
                 pos = self.model.predict(rssiVals) # Dimension?
-                x = np.median(pos[0, :, 0])
-                y = np.median(pos[0, :, 1])
-                z = np.median(pos[0, :, 2])
+                x = np.median(pos[0, valIndexes, 0])
+                y = np.median(pos[0, valIndexes, 1])
+                z = np.median(pos[0, valIndexes, 2])
                 
                 # Calibrate bias.
                 x += xOff
@@ -1267,6 +1283,7 @@ class ISSRFIDLocator(object):
                 rssi_by_aid[aid] = rssi
             
             aids = list(rssi_by_aid.keys())
+            valIndexes = set()
             
             for f_id, f_aid in enumerate(aids):
                 for s_id, s_aid in enumerate(aids):
@@ -1279,11 +1296,14 @@ class ISSRFIDLocator(object):
                         rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
                         rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
             
+                        valIndexes.add(self.combs.index((f_aid, s_aid, t_aid)))
+            
             # Predict a position.
+            valIndexes = list(valIndexes)
             pos = self.model.predict(rssiVals) # Dimension?
-            x = np.median(pos[0, :, 0])
-            y = np.median(pos[0, :, 1])
-            z = np.median(pos[0, :, 2])
+            x = np.median(pos[0, valIndexes, 0])
+            y = np.median(pos[0, valIndexes, 1])
+            z = np.median(pos[0, valIndexes, 2])
             
             # Calculate offset.
             resDF = self.markerLocRefDF[self.markerLocRefDF.epc_id == id]
