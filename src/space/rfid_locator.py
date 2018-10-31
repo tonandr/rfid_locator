@@ -490,12 +490,12 @@ class ISSRFIDLocator(object):
             
             # Input: 2024 x 3 (3 antenna combinations) 
             input = Input(shape=(2024, 3))
-            x = Dense(self.hps['dense1_dim'], activation='relu', name='dense1_' + str(0))(input) #?
+            x = Dense(self.hps['dense1_dim'], activation='relu', use_bias=False, name='dense1_' + str(0))(input) #?
             
             for i in range(1, hps['num_layers']):
-                x = Dense(self.hps['dense1_dim'], activation='relu', name='dense1_' + str(i))(x) #?
+                x = Dense(self.hps['dense1_dim'], activation='relu', use_bias=False, name='dense1_' + str(i))(x) #?
             
-            output = Dense(3, activation='linear', name='dense1_last')(x)
+            output = Dense(3, activation='linear', use_bias=False, name='dense1_last')(x)
                                             
             # Create the model.
             if IS_MULTI_GPU == True:
@@ -558,8 +558,8 @@ class ISSRFIDLocator(object):
         '''
         
         # Load raw data.
-        '''
-        rawDatasDF = pd.read_csv('train.csv')
+        rawDatasDF = pd.read_csv('train.csv').groupby('category')
+        rawDatasDF = rawDatasDF.get_group(0)
 
         # Training data.
         trRawDatasDF = rawDatasDF.iloc[:int(rawDatasDF.shape[0]*(1.0 - hps['val_ratio'])), :]
@@ -623,15 +623,13 @@ class ISSRFIDLocator(object):
         # Save data.
         rssiM.tofile('rssiM_tr.nd')
         posM.tofile('posM_tr.nd')
-        '''
         
-        rssiM = np.fromfile('rssiM_tr.nd').reshape((5028, 2024, 3))
-        posM = np.fromfile('posM_tr.nd').reshape((5028, 2024, 3))
+        #rssiM = np.fromfile('rssiM_tr.nd').reshape((5028, 2024, 3))
+        #posM = np.fromfile('posM_tr.nd').reshape((5028, 2024, 3))
         
         tr = (rssiM, posM)
         
         # Validation data.
-        '''
         valRawDatasDF = rawDatasDF.iloc[int(rawDatasDF.shape[0]*(1.0 - hps['val_ratio'])):, :]
         
         # Make the rssi value matrix and x, y, z matrix according to 3 antenna combinations.
@@ -693,10 +691,9 @@ class ISSRFIDLocator(object):
         # Save data.
         rssiM.tofile('rssiM_val.nd')
         posM.tofile('posM_val.nd')
-        '''
         
-        rssiM = np.fromfile('rssiM_val.nd').reshape((948, 2024, 3))
-        posM = np.fromfile('posM_val.nd').reshape((948, 2024, 3))
+        #rssiM = np.fromfile('rssiM_val.nd').reshape((948, 2024, 3))
+        #posM = np.fromfile('posM_val.nd').reshape((948, 2024, 3))
         
         val = (rssiM, posM)        
         
@@ -762,6 +759,10 @@ class ISSRFIDLocator(object):
                             
                             valIndexes.add(self.combs.index((f_aid, s_aid, t_aid)))
             
+            # Check exception.
+            if len(valIndexes) == 0:
+                continue
+            
             # Predict a position.
             valIndexes = list(valIndexes)
             pos = self.model.predict(rssiVals) # Dimension?
@@ -771,11 +772,13 @@ class ISSRFIDLocator(object):
             
             # Calculate offset.
             resDF = self.markerLocRefDF[self.markerLocRefDF.epc_id == id]
-            xt, yt, zt = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0] #?            
-            
+            xt, yt, zt = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0] #?
+                        
             xOffs.append(xt - x)
             yOffs.append(yt - y)
             zOffs.append(zt - z)
+            
+            print(x, y, z, xt, yt, zt, xt - x, yt - y, zt - z)
         
         # Check exception.
         if len(xOffs) == 0:
@@ -800,6 +803,7 @@ class ISSRFIDLocator(object):
             zt = df.z.iloc[0]
             
             rssiVals = np.zeros(shape=(1,2024,3))
+            valIndexes = set()
             
             for i in range(1, 4):
                 dfG = df.groupby('a' + str(i) + '_id') # Antenna id?
@@ -813,7 +817,6 @@ class ISSRFIDLocator(object):
                     rssi_by_aid[aid] = rssi
                 
                 aids = list(rssi_by_aid.keys())
-                valIndexes = set()
                 
                 for f_id, f_aid in enumerate(aids):
                     for s_id, s_aid in enumerate(aids):
@@ -828,6 +831,10 @@ class ISSRFIDLocator(object):
                             
                             valIndexes.add(self.combs.index((f_aid, s_aid, t_aid)))
             
+            # Check exception.
+            if len(valIndexes) == 0:
+                continue
+            
             # Predict a position.
             valIndexes = list(valIndexes)
             pos = self.model.predict(rssiVals) # Dimension?
@@ -836,9 +843,11 @@ class ISSRFIDLocator(object):
             z = np.median(pos[0, valIndexes, 2])
             
             # Calibrate bias.
-            x += xOff
-            y += yOff
-            z += zOff 
+            #x += xOff
+            #y += yOff
+            #z += zOff 
+            
+            print(x, y, z, xt, yt, zt, xt - x, yt - y, zt - z)
             
             # Check a tag id category, and determine confidence.
             category = self.__checkTagIdCategory__(id)
@@ -937,7 +946,7 @@ class ISSRFIDLocator(object):
         if len(commScores) == 0:
             commScores.append(0.)
         if len(ctbScores) == 0:
-            commScores.append(0.)
+            ctbScores.append(0.)
         
         finalScoreTr = (np.asarray(markerScores).mean() + np.asarray(commScores).mean() + 4. * np.asarray(ctbScores).mean()) / 6. * 1000000.        
                 
@@ -960,6 +969,7 @@ class ISSRFIDLocator(object):
             zt = df.z.iloc[0]
             
             rssiVals = np.zeros(shape=(1,2024,3))
+            valIndexes = set()
             
             for i in range(1, 4):
                 dfG = df.groupby('a' + str(i) + '_id') # Antenna id?
@@ -973,7 +983,6 @@ class ISSRFIDLocator(object):
                     rssi_by_aid[aid] = rssi
                 
                 aids = list(rssi_by_aid.keys())
-                valIndexes = set()
                 
                 for f_id, f_aid in enumerate(aids):
                     for s_id, s_aid in enumerate(aids):
@@ -988,6 +997,10 @@ class ISSRFIDLocator(object):
                             
                             valIndexes.add(self.combs.index((f_aid, s_aid, t_aid)))
             
+            # Check exception.
+            if len(valIndexes) == 0:
+                continue
+            
             # Predict a position.
             valIndexes = list(valIndexes)
             pos = self.model.predict(rssiVals) # Dimension?
@@ -996,9 +1009,11 @@ class ISSRFIDLocator(object):
             z = np.median(pos[0, valIndexes, 2])
             
             # Calibrate bias.
-            x += xOff
-            y += yOff
-            z += zOff 
+            #x += xOff
+            #y += yOff
+            #z += zOff 
+            
+            print(x, y, z, xt, yt, zt, xt - x, yt - y, zt - z)
             
             # Check a tag id category, and determine confidence.
             category = self.__checkTagIdCategory__(id)
@@ -1097,11 +1112,11 @@ class ISSRFIDLocator(object):
         if len(commScores) == 0:
             commScores.append(0.)
         if len(ctbScores) == 0:
-            commScores.append(0.)
+            ctbScores.append(0.)
 
         finalScoreVal = (np.asarray(markerScores).mean() + np.asarray(commScores).mean() + 4. * np.asarray(ctbScores).mean()) / 6. * 1000000.        
                 
-        print('Training data score {0:f}'.format(finalScoreVal))         
+        print('Validation data score {0:f}'.format(finalScoreVal))         
         
         # Save final scores.
         finalScoreDF = pd.DataFrame({'final_score_tr': [finalScoreTr], 'final_score_val': [finalScoreVal]})
@@ -1229,7 +1244,11 @@ class ISSRFIDLocator(object):
                             rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
                 
                             valIndexes.add(self.combs.index((f_aid, s_aid, t_aid)))
-            
+                
+                # Check exception.
+                if len(valIndexes) == 0: #?
+                    continue
+                
                 # Predict a position.
                 valIndexes = list(valIndexes)
                 pos = self.model.predict(rssiVals) # Dimension?
