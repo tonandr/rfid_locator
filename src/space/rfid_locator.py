@@ -560,6 +560,7 @@ class ISSRFIDLocator(object):
         '''
         
         # Load raw data.
+        '''
         rawDatasDF = pd.read_csv('train.csv') #.groupby('category')
         #rawDatasDF = rawDatasDF.get_group(0)
 
@@ -625,13 +626,15 @@ class ISSRFIDLocator(object):
         # Save data.
         rssiM.tofile('rssiM_tr.nd')
         posM.tofile('posM_tr.nd')
+        '''
         
-        #rssiM = np.fromfile('rssiM_tr.nd').reshape((5028, 2024, 3))
-        #posM = np.fromfile('posM_tr.nd').reshape((5028, 2024, 3))
+        rssiM = np.fromfile('rssiM_tr.nd').reshape((5028, 2024, 3))
+        posM = np.fromfile('posM_tr.nd').reshape((5028, 2024, 3))
         
         tr = (rssiM, posM)
         
         # Validation data.
+        '''
         valRawDatasDF = rawDatasDF.iloc[int(rawDatasDF.shape[0]*(1.0 - hps['val_ratio'])):, :]
         
         # Make the rssi value matrix and x, y, z matrix according to 3 antenna combinations.
@@ -693,9 +696,10 @@ class ISSRFIDLocator(object):
         # Save data.
         rssiM.tofile('rssiM_val.nd')
         posM.tofile('posM_val.nd')
+        '''
         
-        #rssiM = np.fromfile('rssiM_val.nd').reshape((948, 2024, 3))
-        #posM = np.fromfile('posM_val.nd').reshape((948, 2024, 3))
+        rssiM = np.fromfile('rssiM_val.nd').reshape((948, 2024, 3))
+        posM = np.fromfile('posM_val.nd').reshape((948, 2024, 3))
         
         val = (rssiM, posM)        
         
