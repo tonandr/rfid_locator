@@ -35,6 +35,8 @@ RMIN_MARKER = 48.0
 RMIN_COMMUNITY = 48.0
 RMIN_CTB = 12.0
 
+NORM_FACTOR = 500.0
+
 IS_MULTI_GPU = False
 NUM_GPUS = 4
 
@@ -558,8 +560,8 @@ class ISSRFIDLocator(object):
         '''
         
         # Load raw data.
-        rawDatasDF = pd.read_csv('train.csv').groupby('category')
-        rawDatasDF = rawDatasDF.get_group(0)
+        rawDatasDF = pd.read_csv('train.csv') #.groupby('category')
+        #rawDatasDF = rawDatasDF.get_group(0)
 
         # Training data.
         trRawDatasDF = rawDatasDF.iloc[:int(rawDatasDF.shape[0]*(1.0 - hps['val_ratio'])), :]
@@ -581,7 +583,7 @@ class ISSRFIDLocator(object):
             .append((rawDataDF.rssi1, rawDataDF.rssi2, rawDataDF.rssi3))
             
             posRawM[rawDataDF.a1_id, rawDataDF.a2_id, rawDataDF.a3_id]\
-            .append((rawDataDF.x, rawDataDF.y, rawDataDF.z))
+            .append((rawDataDF.x/NORM_FACTOR, rawDataDF.y/NORM_FACTOR, rawDataDF.z/NORM_FACTOR))
                 
         # Extract data relevant to 3 antenna combinations.
         rssiM = np.ndarray(shape=(2024), dtype=np.object)
@@ -649,7 +651,7 @@ class ISSRFIDLocator(object):
             .append((rawDataDF.rssi1, rawDataDF.rssi2, rawDataDF.rssi3))
             
             posRawM[rawDataDF.a1_id, rawDataDF.a2_id, rawDataDF.a3_id]\
-            .append((rawDataDF.x, rawDataDF.y, rawDataDF.z))
+            .append((rawDataDF.x/NORM_FACTOR, rawDataDF.y/NORM_FACTOR, rawDataDF.z/NORM_FACTOR))
         
         # Extract data relevant to 3 antenna combinations.
         rssiM = np.ndarray(shape=(2024), dtype=np.object)
@@ -766,9 +768,9 @@ class ISSRFIDLocator(object):
             # Predict a position.
             valIndexes = list(valIndexes)
             pos = self.model.predict(rssiVals) # Dimension?
-            x = np.median(pos[0, valIndexes, 0])
-            y = np.median(pos[0, valIndexes, 1])
-            z = np.median(pos[0, valIndexes, 2])
+            x = np.median(pos[0, valIndexes, 0])*NORM_FACTOR
+            y = np.median(pos[0, valIndexes, 1])*NORM_FACTOR
+            z = np.median(pos[0, valIndexes, 2])*NORM_FACTOR
             
             # Calculate offset.
             resDF = self.markerLocRefDF[self.markerLocRefDF.epc_id == id]
@@ -778,7 +780,8 @@ class ISSRFIDLocator(object):
             yOffs.append(yt - y)
             zOffs.append(zt - z)
             
-            print(x, y, z, xt, yt, zt, xt - x, yt - y, zt - z)
+            #print(x, y, z, xt, yt, zt, xt - x, yt - y, zt - z)
+            print(xt - x, yt - y, zt - z)
         
         # Check exception.
         if len(xOffs) == 0:
@@ -838,16 +841,16 @@ class ISSRFIDLocator(object):
             # Predict a position.
             valIndexes = list(valIndexes)
             pos = self.model.predict(rssiVals) # Dimension?
-            x = np.median(pos[0, valIndexes, 0])
-            y = np.median(pos[0, valIndexes, 1])
-            z = np.median(pos[0, valIndexes, 2])
+            x = np.median(pos[0, valIndexes, 0])*NORM_FACTOR
+            y = np.median(pos[0, valIndexes, 1])*NORM_FACTOR
+            z = np.median(pos[0, valIndexes, 2])*NORM_FACTOR
             
             # Calibrate bias.
             #x += xOff
             #y += yOff
             #z += zOff 
             
-            print(x, y, z, xt, yt, zt, xt - x, yt - y, zt - z)
+            print(xt - x, yt - y, zt - z)
             
             # Check a tag id category, and determine confidence.
             category = self.__checkTagIdCategory__(id)
@@ -1004,16 +1007,16 @@ class ISSRFIDLocator(object):
             # Predict a position.
             valIndexes = list(valIndexes)
             pos = self.model.predict(rssiVals) # Dimension?
-            x = np.median(pos[0, valIndexes, 0])
-            y = np.median(pos[0, valIndexes, 1])
-            z = np.median(pos[0, valIndexes, 2])
+            x = np.median(pos[0, valIndexes, 0])*NORM_FACTOR
+            y = np.median(pos[0, valIndexes, 1])*NORM_FACTOR
+            z = np.median(pos[0, valIndexes, 2])*NORM_FACTOR
             
             # Calibrate bias.
             #x += xOff
             #y += yOff
             #z += zOff 
             
-            print(x, y, z, xt, yt, zt, xt - x, yt - y, zt - z)
+            print(xt - x, yt - y, zt - z)
             
             # Check a tag id category, and determine confidence.
             category = self.__checkTagIdCategory__(id)
