@@ -7,6 +7,7 @@ Created on Oct 17, 2018
 import os
 import argparse
 import time
+import sys
 
 import pandas as pd
 import numpy as np
@@ -137,9 +138,27 @@ def createTrValData(rawDataPath):
     pClient = ipp.Client()
     pView = pClient[:]
     
-    pView.push({'markerLocRefDF': markerLocRefDF, 'commLocRawDF': commLocRawDF, 'ctbLocRefDF': ctbLocRefDF})
+    #with pView.sync_imports(): ?
+    #    import pandas as pd
+    
+    pView.push({'CATEGORY_NONE': CATEGORY_NONE
+                , 'CATEGORY_MARKER': CATEGORY_MARKER
+                , 'CATEGORY_COMMUNITY': CATEGORY_COMMUNITY
+                , 'CATEGORY_CTB': CATEGORY_CTB
+                ,'TIME_SLOT': TIME_SLOT
+                , 'markerLocRefDF': markerLocRefDF
+                , 'commLocRefDF': commLocRefDF
+                , 'ctbLocRefDF': ctbLocRefDF})
+    
 
-    trValDataDFs = pView.map(calLocationTableForEachTag, vals, block=True)    
+    amr = pView.map_async(calLocationTableForEachTag, vals)
+    
+    while not amr.wait(1):
+        for stdout in amr.stdout:
+            sys.stdout.write(stdout)
+
+    trValDataDFs = amr.get()
+        
     '''
     
     trValDataDFs = []
@@ -192,7 +211,58 @@ def calLocationTableForEachTag(val):
         @param val: Train raw DF, tag id, tag id number.
     '''
     
-    global markerLocRefDF, commLocRefDF, ctbLocRefDF
+    print(val[1], val[2])
+    
+    import pandas as pd
+    import numpy as np
+    
+    global CATEGORY_NONE, CATEGORY_MARKER, CATEGORY_COMMUNITY, CATEGORY_CTB
+    global TIME_SLOT, markerLocRefDF, commLocRefDF, ctbLocRefDF
+
+    def applyKalmanFilter(rawDF):
+        '''
+            Apply Kalman filter for rssi according to each antenna id.
+            @param: Raw dataframe.
+        '''
+        
+        rawDFG = rawDF.groupby('antenna_id')
+        count = 0
+        
+        for id in list(rawDFG.groups.keys()):
+            df = rawDFG.get_group(id)
+            
+            # Apply Kalman filter.
+            q = 1e-5
+            r = df.rssi.std()**2
+            rssis_c = []
+            x_pre = df.rssi.median()
+            p_pre = r
+            
+            for i in range(df.rssi.shape[0]):
+                xhat = x_pre
+                phat = p_pre + q
+                
+                k = phat/(phat + r)
+                x = xhat + k * (df.rssi.iloc[i] - xhat)
+                p = (1 - k) * phat
+                
+                rssis_c.append(x)
+                
+                x_pre = x
+                p_pre = p
+            
+            rssis_c = np.asarray(rssis_c)        
+            df.rssi = rssis_c
+            
+            if count == 0:
+                resDF = df
+                count = -1
+            else:
+                resDF = resDF.append(df)
+        
+        resDF = resDF.sort_values(by='date')
+        
+        return resDF
     
     rawDF = val[0]
     tagId = val[1]
@@ -215,7 +285,7 @@ def calLocationTableForEachTag(val):
     rawDF = rawDF.sort_values(by = 'date')
     rawDF.index = pd.to_datetime(rawDF.date)
     rawDF = rawDF[['epc_id', 'antenna_id', 'rssi', 'freq', 'phase', 'power', 'cnt']]
-    
+        
     # Check a valid tag id.
     # Marker.
     resDF = markerLocRefDF[markerLocRefDF.epc_id == tagId]
@@ -267,6 +337,9 @@ def calLocationTableForEachTag(val):
             else:
                 # Non-category?                    
                 return trValDataDF         
+    
+    # Apply Kalman filter.
+    rawDF = applyKalmanFilter(rawDF)
     
     if (tagId != 13127) and (category == CATEGORY_CTB):            
         for rawDF, x, y, z in zip(rawDFs, xs, ys, zs):
