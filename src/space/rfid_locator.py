@@ -21,7 +21,7 @@ import keras
 import ipyparallel as ipp
 
 # Constant.
-TIME_SLOT = pd.Timedelta(1, unit='h')
+TIME_SLOT = pd.Timedelta(30, unit='m')
 
 CATEGORY_NONE = -1
 CATEGORY_MARKER = 0
@@ -132,9 +132,39 @@ def createTrValData(rawDataPath):
                                           , 'y'
                                           , 'z'])
     
-    vals = getTrainRawDFGList(rawDataPath)
+    rawVals = getTrainRawDFGList(rawDataPath)
+    vals = []
     
-    '''
+    for val in rawVals:
+        rawDF = val[0]
+        tagId = val[1]
+            
+        # Check a valid tag id.
+        # Marker.
+        resDF = markerLocRefDF[markerLocRefDF.epc_id == tagId]
+        
+        if resDF.shape[0] != 0:
+            pass
+        else:
+            
+            # Community.
+            resDF = commLocRefDF[commLocRefDF.epc_id == tagId]
+            
+            if resDF.shape[0] != 0:
+                pass
+            else:
+                
+                # CTB.
+                resDF = ctbLocRefDF[ctbLocRefDF.epc_id == tagId]
+                
+                if resDF.shape[0] != 0:
+                    pass
+                else:
+                    # Non-category?                    
+                    continue
+        
+        vals.append(val)
+    
     pClient = ipp.Client()
     pView = pClient[:]
     
@@ -149,18 +179,24 @@ def createTrValData(rawDataPath):
                 , 'markerLocRefDF': markerLocRefDF
                 , 'commLocRefDF': commLocRefDF
                 , 'ctbLocRefDF': ctbLocRefDF})
-    
 
-    amr = pView.map_async(calLocationTableForEachTag, vals)
-    
-    while not amr.wait(1):
-        for stdout in amr.stdout:
-            sys.stdout.write(stdout)
+    trValDataDFs = []
 
-    trValDataDFs = amr.get()
-        
+    for i in range(int(len(vals)/18)):
+        print(i*18)
+        if (i*18 + 18) <= int(len(vals)/18):
+            amr = pView.map_async(calLocationTableForEachTag, vals[(i*18):(i*18 + 18)])
+        else:
+            amr = pView.map_async(calLocationTableForEachTag, vals[(i*18):])
+
+      
+        while not amr.wait(1):
+            for stdout in amr.stdout:
+                sys.stdout.write(stdout)
+
+        trValDataDFs += amr.get()
+
     '''
-    
     trValDataDFs = []
     
     for val in vals:
@@ -169,7 +205,8 @@ def createTrValData(rawDataPath):
         et = time.time()
         
         print(val[1], val[2], et - ft)
-        
+    '''
+   
     trValDataDF = trValDataDFs[0]
     
     for i in range(1, len(trValDataDFs)):
@@ -193,6 +230,7 @@ def getTrainRawDFGList(rawDataPath):
     trainRawDFG = trainRawDF.groupby('epc_id')
     tagIds = list(trainRawDFG.groups.keys())
     numTagIds = len(tagIds)
+    validTagIds = []
     
     # Get group list.
     for tagId in tagIds:
@@ -233,7 +271,13 @@ def calLocationTableForEachTag(val):
             
             # Apply Kalman filter.
             q = 1e-5
-            r = df.rssi.std()**2
+            
+            # Check exception.
+            if df.shape[0] == 1:
+                r = 1.0
+            else:
+                r = df.rssi.std()**2
+                
             rssis_c = []
             x_pre = df.rssi.median()
             p_pre = r
@@ -857,8 +901,8 @@ class ISSRFIDLocator(object):
             yOffs.append(yt - y)
             zOffs.append(zt - z)
             
-            #print(x, y, z, xt, yt, zt, xt - x, yt - y, zt - z)
-            print(xt - x, yt - y, zt - z)
+            print(x, y, z, xt, yt, zt, xt - x, yt - y, zt - z)
+            #print(xt - x, yt - y, zt - z)
         
         # Check exception.
         if len(xOffs) == 0:
@@ -927,7 +971,8 @@ class ISSRFIDLocator(object):
             #y += yOff
             #z += zOff 
             
-            print(xt - x, yt - y, zt - z)
+            print(x, y, z, xt, yt, zt, xt - x, yt - y, zt - z)
+            #print(xt - x, yt - y, zt - z)
             
             # Check a tag id category, and determine confidence.
             category = self.__checkTagIdCategory__(id)
@@ -1093,7 +1138,8 @@ class ISSRFIDLocator(object):
             #y += yOff
             #z += zOff 
             
-            print(xt - x, yt - y, zt - z)
+            print(x, y, z, xt, yt, zt, xt - x, yt - y, zt - z)
+            #print(xt - x, yt - y, zt - z)
             
             # Check a tag id category, and determine confidence.
             category = self.__checkTagIdCategory__(id)
@@ -1243,6 +1289,57 @@ class ISSRFIDLocator(object):
         
         # Save.
         predResultDF.to_csv('iss_rfid_location_result.txt', header=0) #?
+
+    def applyKalmanFilter(self, rawDF):
+        '''
+            Apply Kalman filter for rssi according to each antenna id.
+            @param: Raw dataframe.
+        '''
+        
+        rawDFG = rawDF.groupby(2)
+        count = 0
+        
+        for id in list(rawDFG.groups.keys()):
+            df = rawDFG.get_group(id)
+            
+            # Apply Kalman filter.
+            q = 1e-5
+            
+            # Check exception.
+            if df.shape[0] == 1:
+                r = 1.0
+            else:
+                r = df[3].std()**2
+            
+            rssis_c = []
+            x_pre = df[3].median()
+            p_pre = r
+            
+            for i in range(df[3].shape[0]):
+                xhat = x_pre
+                phat = p_pre + q
+                
+                k = phat/(phat + r)
+                x = xhat + k * (df[3].iloc[i] - xhat)
+                p = (1 - k) * phat
+                
+                rssis_c.append(x)
+                
+                x_pre = x
+                p_pre = p
+            
+            rssis_c = np.asarray(rssis_c)        
+            df[3] = rssis_c
+            
+            if count == 0:
+                resDF = df
+                count = -1
+            else:
+                resDF = resDF.append(df)
+        
+        resDF = resDF.sort_values(by=0)
+        
+        return resDF
             
     def predictRFIDLocations(self, taskId, taskTagIds, taskRFIDDataDF):
         '''
@@ -1294,49 +1391,63 @@ class ISSRFIDLocator(object):
                 
                 # Predict a position and radius confidence.
                 try:
-                    df = taskRFIDDataDFG.get_group(id) # No signal?
+                    rawDF = taskRFIDDataDFG.get_group(id) # No signal?
                 except Exception:
                     continue
+                                   
+                rawDF = self.applyKalmanFilter(rawDF)
+                rawDF.index = pd.to_datetime(rawDF[0])
                 
-                dfG = df.groupby(2) # Antenna id. #?
-                   
-                # Get rssi values.
-                rssiVals = np.zeros(shape=(1,2024,3))    
-                rssi_by_aid = {}
+                st = rawDF.index[0]
+                et = rawDF.index[-1]
                 
-                for aid in list(dfG.groups.keys()):
-                    df = dfG.get_group(aid)
-                    rssi = df.loc[:, 3].median() #?
-                    rssi_by_aid[aid] = rssi
+                ist = st
+                iet = ist + TIME_SLOT        
                 
-                aids = list(rssi_by_aid.keys())
-                valIndexes = set()
+                xs, ys, zs = [], [], []
                 
-                for f_id, f_aid in enumerate(aids):
-                    for s_id, s_aid in enumerate(aids):
-                        if s_id <= f_id: continue
-                        
-                        for t_id, t_aid in enumerate(aids):
-                            if t_id <= s_id: continue        
+                while ist < et:
+                    df = rawDF[ist:iet]
+                    
+                    dfG = df.groupby(2) # Antenna id?
+                    
+                    # Get rssi values.
+                    rssiVals = np.zeros(shape=(1,2024,3))
+                    rssi_by_aid = {}
+                    
+                    for aid in list(dfG.groups.keys()):
+                        df = dfG.get_group(aid)
+                        rssi = df.loc[:, 3].median() #?
+                        rssi_by_aid[aid] = rssi
+                    
+                    aids = list(rssi_by_aid.keys())
+                    valIndexes = set()
+                    
+                    for f_id, f_aid in enumerate(aids):
+                        for s_id, s_aid in enumerate(aids):
+                            if s_id <= f_id: continue
                             
-                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 0] = rssi_by_aid[f_aid]
-                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
-                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
-                
-                            valIndexes.add(self.combs.index((f_aid, s_aid, t_aid)))
-                
-                # Check exception.
-                if len(valIndexes) == 0: #?
-                    continue
-                
-                # Predict a position.
-                valIndexes = list(valIndexes)
-                pos = self.model.predict(rssiVals) # Dimension?
-                x = np.median(pos[0, valIndexes, 0])
-                y = np.median(pos[0, valIndexes, 1])
-                z = np.median(pos[0, valIndexes, 2])
+                            for t_id, t_aid in enumerate(aids):
+                                if t_id <= s_id: continue        
+                                
+                                rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 0] = rssi_by_aid[f_aid]
+                                rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
+                                rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
+                    
+                                valIndexes.add(self.combs.index((f_aid, s_aid, t_aid)))
+                    
+                    # Predict a position.
+                    valIndexes = list(valIndexes)
+                    pos = self.model.predict(rssiVals) # Dimension?
+                    xs.append(np.median(pos[0, valIndexes, 0]))
+                    ys.append(np.median(pos[0, valIndexes, 1]))
+                    zs.append(np.median(pos[0, valIndexes, 2]))
                 
                 # Calibrate bias.
+                x = np.asarray(xs).median()
+                y = np.asarray(ys).median()
+                z = np.asarray(zs).median()
+                
                 x += xOff
                 y += yOff
                 z += zOff 
@@ -1366,51 +1477,66 @@ class ISSRFIDLocator(object):
         
         for id in self.markerIds:
             try:
-                df = taskRFIDDataDFG.get_group(id)
+                rawDF = taskRFIDDataDFG.get_group(id)
             except Exception:
                 continue
             
-            dfG = df.groupby(2) # Antenna id?
+            rawDF = self.applyKalmanFilter(rawDF)
+            rawDF.index = pd.to_datetime(rawDF[0])
             
-            # Get rssi values.
-            rssiVals = np.zeros(shape=(1,2024,3))
-            rssi_by_aid = {}
+            st = rawDF.index[0]
+            et = rawDF.index[-1]
             
-            for aid in list(dfG.groups.keys()):
-                df = dfG.get_group(aid)
-                rssi = df.loc[:, 3].median() #?
-                rssi_by_aid[aid] = rssi
+            ist = st
+            iet = ist + TIME_SLOT        
             
-            aids = list(rssi_by_aid.keys())
-            valIndexes = set()
-            
-            for f_id, f_aid in enumerate(aids):
-                for s_id, s_aid in enumerate(aids):
-                    if s_id <= f_id: continue
-                    
-                    for t_id, t_aid in enumerate(aids):
-                        if t_id <= s_id: continue        
+            while ist < et:
+                df = rawDF[ist:iet]
+                
+                dfG = df.groupby(2) # Antenna id?
+                
+                # Get rssi values.
+                rssiVals = np.zeros(shape=(1,2024,3))
+                rssi_by_aid = {}
+                
+                for aid in list(dfG.groups.keys()):
+                    df = dfG.get_group(aid)
+                    rssi = df.loc[:, 3].median() #?
+                    rssi_by_aid[aid] = rssi
+                
+                aids = list(rssi_by_aid.keys())
+                valIndexes = set()
+                
+                for f_id, f_aid in enumerate(aids):
+                    for s_id, s_aid in enumerate(aids):
+                        if s_id <= f_id: continue
                         
-                        rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 0] = rssi_by_aid[f_aid]
-                        rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
-                        rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
+                        for t_id, t_aid in enumerate(aids):
+                            if t_id <= s_id: continue        
+                            
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 0] = rssi_by_aid[f_aid]
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 1] = rssi_by_aid[s_aid]
+                            rssiVals[0, self.combs.index((f_aid, s_aid, t_aid)), 2] = rssi_by_aid[t_aid]
+                
+                            valIndexes.add(self.combs.index((f_aid, s_aid, t_aid)))
+                
+                # Predict a position.
+                valIndexes = list(valIndexes)
+                pos = self.model.predict(rssiVals) # Dimension?
+                x = np.median(pos[0, valIndexes, 0])
+                y = np.median(pos[0, valIndexes, 1])
+                z = np.median(pos[0, valIndexes, 2])
+                
+                # Calculate offset.
+                resDF = self.markerLocRefDF[self.markerLocRefDF.epc_id == id]
+                xt, yt, zt = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0] #? 
+                
+                ist = iet
+                iet = ist + TIME_SLOT            
             
-                        valIndexes.add(self.combs.index((f_aid, s_aid, t_aid)))
-            
-            # Predict a position.
-            valIndexes = list(valIndexes)
-            pos = self.model.predict(rssiVals) # Dimension?
-            x = np.median(pos[0, valIndexes, 0])
-            y = np.median(pos[0, valIndexes, 1])
-            z = np.median(pos[0, valIndexes, 2])
-            
-            # Calculate offset.
-            resDF = self.markerLocRefDF[self.markerLocRefDF.epc_id == id]
-            xt, yt, zt = resDF.x.iloc[0], resDF.y.iloc[0], resDF.z.iloc[0] #?            
-            
-            xOffs.append(xt - x)
-            yOffs.append(yt - y)
-            zOffs.append(zt - z)
+                xOffs.append(xt - x)
+                yOffs.append(yt - y)
+                zOffs.append(zt - z)
         
         # Check exception.
         if len(xOffs) == 0:
